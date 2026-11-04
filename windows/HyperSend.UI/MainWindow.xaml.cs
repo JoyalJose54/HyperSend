@@ -4,11 +4,13 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using HyperSend.Core;
@@ -17,6 +19,9 @@ using IOPath = System.IO.Path;
 
 namespace HyperSend.UI
 {
+    // ─────────────────────────────────────────────
+    // Simple file item model for the ListView
+    // ─────────────────────────────────────────────
     public class TransferItem
     {
         public string Icon { get; set; } = "📄";
@@ -30,115 +35,565 @@ namespace HyperSend.UI
 
     public partial class MainWindow : Window
     {
-        private static readonly byte[] DefaultFixedSalt = new byte[16] {
+        // ─────────────────────────────────────────────
+        // State machine
+        // ─────────────────────────────────────────────
+        private enum AppState { Idle, PairingReceiver, PairingSender, Transferring, Complete }
+        private AppState _state = AppState.Idle;
+        private bool _isSender;
+
+        // ─────────────────────────────────────────────
+        // Core fields
+        // ─────────────────────────────────────────────
+        private static readonly byte[] _defaultSalt = new byte[16] {
             0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A,
             0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A
         };
 
         private readonly ObservableCollection<TransferItem> _items = new();
-        private readonly List<double> _speedSamples = new();
-        private readonly DispatcherTimer _linkRefreshTimer;
-        private CancellationTokenSource? _activeTransferCts;
-        private bool _isReceiverRunning = false;
-        private CancellationTokenSource? _receiverCts;
+        private CancellationTokenSource? _transferCts;
         private string _saveDirectory;
 
+        // Transfer result captured for CompletePanel
+        private double _finalAvgMBps;
+        private long _finalTotalBytes;
+        private double _finalElapsedSec;
+
+        // Arc geometry constants
+        private const double ArcRadius = 110.0;
+        private const double ArcCenterX = 140.0;
+        private const double ArcCenterY = 140.0;
+
+        // Progress bar container width (synced to border width in XAML)
+        private double _progressBarContainerWidth = 520.0;
+
+        // Storyboards (looked up after InitializeComponent)
+        private Storyboard? _pulseStoryboard;
+
+        // ─────────────────────────────────────────────
+        // Constructor
+        // ─────────────────────────────────────────────
         public MainWindow()
         {
             InitializeComponent();
 
             FileList.ItemsSource = _items;
 
-            string downloads = IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+            string downloads = IOPath.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
             _saveDirectory = IOPath.Combine(downloads, "HyperSend");
-            TxtSaveDir.Text = $"Save to: {_saveDirectory}";
 
+            // Set hostname badge
+            TxtHostname.Text = System.Net.Dns.GetHostName();
+            TxtDevicePcName.Text = System.Net.Dns.GetHostName();
+
+            // Start link health refresh
             RefreshLinkHealth();
+            var linkTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
+            linkTimer.Tick += (_, _) => RefreshLinkHealth();
+            linkTimer.Start();
 
-            _linkRefreshTimer = new DispatcherTimer
+            // Start idle pulse animation
+            Loaded += (_, _) =>
             {
-                Interval = TimeSpan.FromSeconds(5)
+                _pulseStoryboard = (Storyboard)Resources["PulseAnimation"];
+                _pulseStoryboard?.Begin();
+
+                // Draw the background arc (static full circle)
+                DrawBackgroundArc();
+                // Start at 0
+                UpdateProgressArc(0);
             };
-            _linkRefreshTimer.Tick += (s, e) => RefreshLinkHealth();
-            _linkRefreshTimer.Start();
         }
 
+        // ─────────────────────────────────────────────
+        // Network / Link Health
+        // ─────────────────────────────────────────────
         private void RefreshLinkHealth()
+        {
+            Task.Run(() =>
+            {
+                try
+                {
+                    var health = NetworkDiscovery.QueryLinkHealth();
+                    var gw = NetworkDiscovery.GetPhoneHotspotGatewayIp();
+                    string localIp = GetLocalIp();
+
+                    Dispatcher.Invoke(() =>
+                    {
+                        if (health.IsOptimal5GHzAx)
+                        {
+                            StatusDot.Fill = new SolidColorBrush(Color.FromRgb(0x66, 0xBB, 0x6A));
+                            TxtLinkStatus.Text = $"5 GHz Wi-Fi 6  ·  {health.Band}  ·  {health.TransmitRateMbps:F0} Mbps";
+                        }
+                        else if (!string.IsNullOrWhiteSpace(health.Ssid) && health.Ssid != "Unknown")
+                        {
+                            StatusDot.Fill = new SolidColorBrush(Color.FromRgb(0xF5, 0xA6, 0x23));
+                            TxtLinkStatus.Text = $"{health.Band}  {health.RadioType}  (not Wi-Fi 6)";
+                        }
+                        else
+                        {
+                            StatusDot.Fill = new SolidColorBrush(Color.FromRgb(0xEF, 0x53, 0x50));
+                            TxtLinkStatus.Text = "No Wi-Fi link detected";
+                        }
+
+                        TxtLocalIp.Text = localIp;
+
+                        // Auto-fill phone IP if TextBox is empty
+                        if (string.IsNullOrWhiteSpace(TxtPhoneIp.Text) && gw != null)
+                            TxtPhoneIp.Text = gw.ToString();
+                    });
+                }
+                catch { }
+            });
+        }
+
+        private static string GetLocalIp()
         {
             try
             {
-                var health = NetworkDiscovery.QueryLinkHealth();
-                TxtLinkSsid.Text = $"SSID: {health.Ssid}";
-                TxtBand.Text = health.Band;
-                TxtRadio.Text = health.RadioType;
-                TxtChannel.Text = health.Channel > 0 ? health.Channel.ToString() : "--";
-                TxtRates.Text = $"{health.ReceiveRateMbps} / {health.TransmitRateMbps} Mbps";
-
-                if (health.IsOptimal5GHzAx)
+                foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
-                    HealthBadge.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#065F46"));
-                    HealthBadgeText.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#34D399"));
-                    HealthBadgeText.Text = "Optimal Wi-Fi 6 (5 GHz)";
-                    AdvicePanel.Visibility = Visibility.Collapsed;
-                }
-                else
-                {
-                    HealthBadge.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#78350F"));
-                    HealthBadgeText.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FDE68A"));
-                    HealthBadgeText.Text = "Suboptimal Link";
-
-                    AdvicePanel.Visibility = Visibility.Visible;
-                    TxtAdvice.Text = "Advice: On Phone Hotspot settings, switch Band to 5 GHz and turn ON 'Support Wi-Fi 6' to reach >90 MB/s.";
-                }
-
-                // Auto-detect gateway if not already set or default
-                if (TxtPhoneIp.Text == "Auto-detecting..." || string.IsNullOrWhiteSpace(TxtPhoneIp.Text))
-                {
-                    var gw = NetworkDiscovery.GetPhoneHotspotGatewayIp();
-                    if (gw != null)
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    foreach (var ua in ni.GetIPProperties().UnicastAddresses)
                     {
-                        TxtPhoneIp.Text = gw.ToString();
-                        TxtStatusLog.Text = $"Auto-detected Phone Gateway: {gw}";
+                        if (ua.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                            return ua.Address.ToString();
                     }
                 }
             }
+            catch { }
+            return "";
+        }
+
+        // ─────────────────────────────────────────────
+        // Panel / State transitions
+        // ─────────────────────────────────────────────
+        private void ShowPanel(AppState newState)
+        {
+            _state = newState;
+
+            // Hide all panels first
+            IdlePanel.Visibility = Visibility.Collapsed;
+            PairingPanel.Visibility = Visibility.Collapsed;
+            TransferPanel.Visibility = Visibility.Collapsed;
+            CompletePanel.Visibility = Visibility.Collapsed;
+
+            switch (newState)
+            {
+                case AppState.Idle:
+                    IdlePanel.Visibility = Visibility.Visible;
+                    _pulseStoryboard?.Begin();
+                    break;
+
+                case AppState.PairingReceiver:
+                    PairingPanel.Visibility = Visibility.Visible;
+                    TxtPairingTitle.Text = "Waiting for Connection";
+                    ReceiverSubPanel.Visibility = Visibility.Visible;
+                    SenderSubPanel.Visibility = Visibility.Collapsed;
+                    string pin = GeneratePin();
+                    TxtPinDisplay.Text = pin;
+                    break;
+
+                case AppState.PairingSender:
+                    PairingPanel.Visibility = Visibility.Visible;
+                    TxtPairingTitle.Text = "Connect to Phone";
+                    ReceiverSubPanel.Visibility = Visibility.Collapsed;
+                    SenderSubPanel.Visibility = Visibility.Visible;
+                    // Auto-detect phone IP
+                    if (string.IsNullOrWhiteSpace(TxtPhoneIp.Text))
+                    {
+                        var gw = NetworkDiscovery.GetPhoneHotspotGatewayIp();
+                        if (gw != null) TxtPhoneIp.Text = gw.ToString();
+                    }
+                    break;
+
+                case AppState.Transferring:
+                    TransferPanel.Visibility = Visibility.Visible;
+                    // Set roles
+                    if (_isSender)
+                    {
+                        TxtPcRole.Text = "SENDING";
+                        TxtPcRole.Foreground = new SolidColorBrush(Color.FromRgb(0x4F, 0xC3, 0xF7));
+                        PcRoleBadge.Background = new SolidColorBrush(Color.FromArgb(0x1A, 0x25, 0x63, 0xEB));
+                        TxtPhoneRole.Text = "RECEIVING";
+                        TxtPhoneRole.Foreground = new SolidColorBrush(Color.FromRgb(0x26, 0xC6, 0xDA));
+                        PhoneRoleBadge.Background = new SolidColorBrush(Color.FromArgb(0x1A, 0x26, 0xC6, 0xDA));
+                        TxtTargetLabel.Text = "🎯 Target: ≥65 MB/s (PC→Phone)";
+                    }
+                    else
+                    {
+                        TxtPcRole.Text = "RECEIVING";
+                        TxtPcRole.Foreground = new SolidColorBrush(Color.FromRgb(0x26, 0xC6, 0xDA));
+                        PcRoleBadge.Background = new SolidColorBrush(Color.FromArgb(0x1A, 0x26, 0xC6, 0xDA));
+                        TxtPhoneRole.Text = "SENDING";
+                        TxtPhoneRole.Foreground = new SolidColorBrush(Color.FromRgb(0x4F, 0xC3, 0xF7));
+                        PhoneRoleBadge.Background = new SolidColorBrush(Color.FromArgb(0x1A, 0x25, 0x63, 0xEB));
+                        TxtTargetLabel.Text = "🎯 Target: ≥90 MB/s (Phone→PC)";
+                    }
+                    TxtTargetStatus.Text = "";
+                    // Start flow dot animations
+                    StartFlowAnimations();
+                    // Reset arc
+                    UpdateProgressArc(0);
+                    break;
+
+                case AppState.Complete:
+                    CompletePanel.Visibility = Visibility.Visible;
+                    // Fill summary
+                    TxtCompleteSpeed.Text = $"{_finalAvgMBps:F1} MB/s";
+                    TxtCompleteSize.Text = FormatBytes(_finalTotalBytes);
+                    TxtCompleteTime.Text = $"{_finalElapsedSec:F1}s";
+                    double targetThreshold = _isSender ? 65.0 : 90.0;
+                    TrophyBadge.Visibility = _finalAvgMBps >= targetThreshold
+                        ? Visibility.Visible : Visibility.Collapsed;
+                    break;
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Idle panel buttons
+        // ─────────────────────────────────────────────
+        private void BtnSendToPhone_Click(object sender, RoutedEventArgs e)
+        {
+            _isSender = true;
+            ShowPanel(AppState.PairingSender);
+        }
+
+        private void BtnReceiveFromPhone_Click(object sender, RoutedEventArgs e)
+        {
+            _isSender = false;
+            ShowPanel(AppState.PairingReceiver);
+            // Start listening in background
+            StartReceiverPairing();
+        }
+
+        // ─────────────────────────────────────────────
+        // Pairing panel
+        // ─────────────────────────────────────────────
+        private void BtnPairingBack_Click(object sender, RoutedEventArgs e)
+        {
+            _transferCts?.Cancel();
+            ShowPanel(AppState.Idle);
+        }
+
+        private string GeneratePin()
+        {
+            var rng = new Random();
+            return rng.Next(100000, 999999).ToString();
+        }
+
+        // ─────────────────────────────────────────────
+        // Sender connect & send
+        // ─────────────────────────────────────────────
+        private async void BtnConnectAndSend_Click(object sender, RoutedEventArgs e)
+        {
+            string ip = TxtPhoneIp.Text.Trim();
+            if (string.IsNullOrEmpty(ip))
+            {
+                MessageBox.Show("Please enter the phone IP address.", "IP Required",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            string pin = TxtPin.Text.Trim();
+            if (pin.Length != 6 || !pin.All(char.IsDigit))
+            {
+                MessageBox.Show("Please enter the 6-digit PIN shown on the phone.", "PIN Required",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (_items.Count == 0)
+            {
+                MessageBox.Show("Please add files to send.", "No Files",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            _transferCts = new CancellationTokenSource();
+            ShowPanel(AppState.Transferring);
+
+            try
+            {
+                byte[] sessionKey = CryptoEngine.DerivePinKey(pin, _defaultSalt);
+                ThroughputMeter? lastMeter = null;
+
+                var progress = new Progress<TransferProgress>(p => Dispatcher.Invoke(() => UpdateTransferUI(p)));
+
+                foreach (var item in _items)
+                {
+                    TxtCurrentFile.Text = item.Name;
+
+                    if (item.IsDirectory)
+                    {
+                        var (largeFiles, bundles) = BundlePacker.ScanDirectory(item.FullPath);
+                        foreach (var bundle in bundles)
+                        {
+                            byte[] packed = await BundlePacker.PackBundleAsync(bundle, _transferCts.Token);
+                            string tempPath = IOPath.GetTempFileName();
+                            try
+                            {
+                                await File.WriteAllBytesAsync(tempPath, packed, _transferCts.Token);
+                                var client = new EncryptedChunkedSender(ip, NetworkConfig.DefaultPort,
+                                    sessionKey, 1L, 6, NetworkConfig.DefaultChunkSize);
+                                lastMeter = await client.RunSenderAsync(tempPath, packed.Length,
+                                    progress, _transferCts.Token);
+                            }
+                            finally { if (File.Exists(tempPath)) File.Delete(tempPath); }
+                        }
+                        foreach (var large in largeFiles)
+                        {
+                            var client = new EncryptedChunkedSender(ip, NetworkConfig.DefaultPort,
+                                sessionKey, 1L, 6, NetworkConfig.DefaultChunkSize);
+                            lastMeter = await client.RunSenderAsync(large.AbsoluteSourcePath,
+                                large.FileSize, progress, _transferCts.Token);
+                        }
+                    }
+                    else
+                    {
+                        var client = new EncryptedChunkedSender(ip, NetworkConfig.DefaultPort,
+                            sessionKey, 1L, 6, NetworkConfig.DefaultChunkSize);
+                        lastMeter = await client.RunSenderAsync(item.FullPath, item.FileSize,
+                            progress, _transferCts.Token);
+                    }
+                }
+
+                if (lastMeter != null)
+                {
+                    var (avg, _, total, elapsed) = lastMeter.GetSummary();
+                    _finalAvgMBps = avg;
+                    _finalTotalBytes = total;
+                    _finalElapsedSec = elapsed;
+                }
+                ShowPanel(AppState.Complete);
+            }
+            catch (OperationCanceledException)
+            {
+                ShowPanel(AppState.Idle);
+            }
             catch (Exception ex)
             {
-                TxtStatusLog.Text = $"Network scan error: {ex.Message}";
+                MessageBox.Show($"Transfer failed: {ex.Message}", "Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                ShowPanel(AppState.PairingSender);
+            }
+            finally
+            {
+                _transferCts = null;
             }
         }
 
-        private void BtnRefreshLink_Click(object sender, RoutedEventArgs e)
+        // ─────────────────────────────────────────────
+        // Receiver pairing + transfer
+        // ─────────────────────────────────────────────
+        private void StartReceiverPairing()
         {
-            RefreshLinkHealth();
+            // The PIN is already displayed. We pick it up when the sender connects.
+            // We'll prompt for PIN confirmation (the user manually checks it matches).
+            // Then start listening.
+            string pin = TxtPinDisplay.Text;
+            if (pin.Length != 6) return;
+
+            _transferCts = new CancellationTokenSource();
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    byte[] sessionKey = CryptoEngine.DerivePinKey(pin, _defaultSalt);
+
+                    Directory.CreateDirectory(_saveDirectory);
+                    string dest = IOPath.Combine(_saveDirectory,
+                        $"HyperSend_{DateTime.Now:yyyyMMdd_HHmmss}.dat");
+
+                    var receiver = new EncryptedChunkedReceiver(sessionKey, 1L,
+                        NetworkConfig.DefaultPort, 6);
+
+                    // Switch to Transferring panel once someone connects
+                    // We do it immediately so the user sees the spinner
+                    Dispatcher.Invoke(() =>
+                    {
+                        _isSender = false;
+                        ShowPanel(AppState.Transferring);
+                        TxtCurrentFile.Text = "Waiting for incoming data…";
+                    });
+
+                    var progress = new Progress<TransferProgress>(p =>
+                        Dispatcher.Invoke(() => UpdateTransferUI(p)));
+
+                    var meter = await receiver.RunReceiverAsync(dest, 0,
+                        NetworkConfig.DefaultChunkSize, progress, _transferCts.Token);
+
+                    var (avg, _, total, elapsed) = meter.GetSummary();
+                    _finalAvgMBps = avg;
+                    _finalTotalBytes = total;
+                    _finalElapsedSec = elapsed;
+
+                    Dispatcher.Invoke(() => ShowPanel(AppState.Complete));
+                }
+                catch (OperationCanceledException)
+                {
+                    Dispatcher.Invoke(() => ShowPanel(AppState.Idle));
+                }
+                catch (Exception ex)
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        MessageBox.Show($"Receiver error: {ex.Message}", "Error",
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+                        ShowPanel(AppState.Idle);
+                    });
+                }
+                finally
+                {
+                    _transferCts = null;
+                }
+            });
         }
 
-        private void BtnAutoIp_Click(object sender, RoutedEventArgs e)
+        // ─────────────────────────────────────────────
+        // Transfer UI update (called from Progress<T>)
+        // ─────────────────────────────────────────────
+        private void UpdateTransferUI(TransferProgress p)
         {
-            var gw = NetworkDiscovery.GetPhoneHotspotGatewayIp();
-            if (gw != null)
+            double fraction = p.TotalBytes > 0
+                ? Math.Clamp((double)p.BytesTransferred / p.TotalBytes, 0.0, 1.0)
+                : 0.0;
+
+            // Arc
+            UpdateProgressArc(fraction);
+
+            // Center text
+            TxtLiveSpeed.Text = $"{p.CurrentMBps:F1}";
+            TxtProgressPct.Text = $"{p.Percentage:F1}%";
+
+            // Stats
+            TxtAvgSpeed.Text = $"{p.AverageMBps:F1} MB/s";
+            TxtTransferred.Text = FormatBytes(p.BytesTransferred);
+
+            if (p.CurrentMBps > 0.5 && p.TotalBytes > 0)
             {
-                TxtPhoneIp.Text = gw.ToString();
-                TxtStatusLog.Text = $"Found Phone IP: {gw}";
+                double remaining = (p.TotalBytes - p.BytesTransferred) / (1024.0 * 1024.0);
+                double eta = remaining / p.CurrentMBps;
+                TxtEta.Text = eta < 60 ? $"{eta:F0}s" : $"{eta / 60:F1}m";
             }
             else
             {
-                TxtStatusLog.Text = "Could not detect active gateway. Please enter phone IP manually.";
+                TxtEta.Text = "--";
+            }
+
+            // Linear progress bar fill
+            double containerWidth = ProgressBarFill.ActualWidth > 0
+                ? ((System.Windows.FrameworkElement)ProgressBarFill.Parent).ActualWidth
+                : _progressBarContainerWidth;
+            ProgressBarFill.Width = containerWidth * fraction;
+
+            // Target status
+            double threshold = _isSender ? 65.0 : 90.0;
+            if (p.AverageMBps >= threshold)
+            {
+                TxtTargetStatus.Text = $"✅ Exceeding target ({p.AverageMBps:F1} MB/s)";
+                TxtTargetStatus.Foreground = new SolidColorBrush(Color.FromRgb(0x66, 0xBB, 0x6A));
+            }
+            else
+            {
+                TxtTargetStatus.Text = $"⚠ {p.AverageMBps:F1} MB/s (below target)";
+                TxtTargetStatus.Foreground = new SolidColorBrush(Color.FromRgb(0xF5, 0xA6, 0x23));
             }
         }
 
-        #region Drag and Drop & File Management
+        // ─────────────────────────────────────────────
+        // Arc drawing
+        // ─────────────────────────────────────────────
+        private void DrawBackgroundArc()
+        {
+            // Draw a full 360° circle as background track
+            double r = ArcRadius;
+            double cx = ArcCenterX;
+            double cy = ArcCenterY;
 
+            // Use a nearly-full arc (359.99°) so it renders as full circle
+            double endAngle = -Math.PI / 2 + 2 * Math.PI * 0.9999;
+            double x1 = cx + r * Math.Cos(-Math.PI / 2);
+            double y1 = cy + r * Math.Sin(-Math.PI / 2);
+            double x2 = cx + r * Math.Cos(endAngle);
+            double y2 = cy + r * Math.Sin(endAngle);
+
+            var seg = new ArcSegment(new Point(x2, y2), new Size(r, r), 0,
+                true, SweepDirection.Clockwise, true);
+            var fig = new PathFigure(new Point(x1, y1), new[] { seg }, false);
+            ArcBackground.Data = new PathGeometry(new[] { fig });
+        }
+
+        private void UpdateProgressArc(double progressFraction)
+        {
+            progressFraction = Math.Clamp(progressFraction, 0.0, 0.9999);
+
+            double r = ArcRadius;
+            double cx = ArcCenterX;
+            double cy = ArcCenterY;
+
+            double startAngle = -Math.PI / 2;
+            double endAngle = startAngle + 2 * Math.PI * progressFraction;
+
+            double x1 = cx + r * Math.Cos(startAngle);
+            double y1 = cy + r * Math.Sin(startAngle);
+            double x2 = cx + r * Math.Cos(endAngle);
+            double y2 = cy + r * Math.Sin(endAngle);
+
+            if (progressFraction < 0.001)
+            {
+                // Don't draw tiny arcs — just clear
+                ProgressArcPath.Data = null;
+                return;
+            }
+
+            bool isLargeArc = progressFraction > 0.5;
+            var arcSeg = new ArcSegment(new Point(x2, y2), new Size(r, r), 0,
+                isLargeArc, SweepDirection.Clockwise, true);
+            var pathFig = new PathFigure(new Point(x1, y1), new[] { arcSeg }, false);
+            ProgressArcPath.Data = new PathGeometry(new[] { pathFig });
+        }
+
+        // ─────────────────────────────────────────────
+        // Flow dot animations (TransferPanel)
+        // ─────────────────────────────────────────────
+        private void StartFlowAnimations()
+        {
+            foreach (string key in new[] {
+                "FlowDot1Anim","FlowDot2Anim","FlowDot3Anim","FlowDot4Anim","FlowDot5Anim"})
+            {
+                ((Storyboard)Resources[key]).Begin();
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Cancel transfer
+        // ─────────────────────────────────────────────
+        private void BtnCancelTransfer_Click(object sender, RoutedEventArgs e)
+        {
+            _transferCts?.Cancel();
+            // ShowPanel(Idle) will be called in the finally block of the async task
+        }
+
+        // ─────────────────────────────────────────────
+        // Complete panel — Done button
+        // ─────────────────────────────────────────────
+        private void BtnDone_Click(object sender, RoutedEventArgs e)
+        {
+            _items.Clear();
+            ShowPanel(AppState.Idle);
+        }
+
+        // ─────────────────────────────────────────────
+        // Drag & Drop + File management
+        // ─────────────────────────────────────────────
         private void Window_DragOver(object sender, DragEventArgs e)
         {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
-            {
-                e.Effects = DragDropEffects.Copy;
-            }
-            else
-            {
-                e.Effects = DragDropEffects.None;
-            }
+            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
+                ? DragDropEffects.Copy : DragDropEffects.None;
             e.Handled = true;
         }
 
@@ -146,8 +601,15 @@ namespace HyperSend.UI
         {
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
-                string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
+                var files = (string[])e.Data.GetData(DataFormats.FileDrop);
                 AddPaths(files);
+
+                // If we're on idle, switch to sender pairing
+                if (_state == AppState.Idle)
+                {
+                    _isSender = true;
+                    ShowPanel(AppState.PairingSender);
+                }
             }
         }
 
@@ -158,29 +620,13 @@ namespace HyperSend.UI
 
         private void BtnAddFiles_Click(object sender, RoutedEventArgs e)
         {
-            var dlg = new OpenFileDialog
-            {
-                Multiselect = true,
-                Title = "Select files to send via HyperSend"
-            };
-
-            if (dlg.ShowDialog() == true)
-            {
-                AddPaths(dlg.FileNames);
-            }
+            var dlg = new OpenFileDialog { Multiselect = true, Title = "Select files to send" };
+            if (dlg.ShowDialog() == true) AddPaths(dlg.FileNames);
         }
 
-        private void BtnAddFolder_Click(object sender, RoutedEventArgs e)
+        private void BtnClearFiles_Click(object sender, RoutedEventArgs e)
         {
-            var dlg = new OpenFolderDialog
-            {
-                Title = "Select folder to send via HyperSend"
-            };
-
-            if (dlg.ShowDialog() == true)
-            {
-                AddPaths(new[] { dlg.FolderName });
-            }
+            _items.Clear();
         }
 
         private void AddPaths(string[] paths)
@@ -190,22 +636,14 @@ namespace HyperSend.UI
                 if (Directory.Exists(p))
                 {
                     long dirSize = 0;
-                    try
-                    {
-                        var di = new DirectoryInfo(p);
-                        dirSize = di.EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length);
-                    }
+                    try { dirSize = new DirectoryInfo(p)
+                        .EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length); }
                     catch { }
-
                     _items.Add(new TransferItem
                     {
-                        Icon = "📁",
-                        Name = IOPath.GetFileName(p),
-                        FullPath = p,
-                        IsDirectory = true,
-                        FileSize = dirSize,
-                        DisplaySize = FormatBytes(dirSize),
-                        Status = "Folder"
+                        Icon = "📁", Name = IOPath.GetFileName(p), FullPath = p,
+                        IsDirectory = true, FileSize = dirSize,
+                        DisplaySize = FormatBytes(dirSize), Status = "Folder"
                     });
                 }
                 else if (File.Exists(p))
@@ -213,32 +651,17 @@ namespace HyperSend.UI
                     var fi = new FileInfo(p);
                     _items.Add(new TransferItem
                     {
-                        Icon = "📄",
-                        Name = fi.Name,
-                        FullPath = p,
-                        IsDirectory = false,
-                        FileSize = fi.Length,
-                        DisplaySize = FormatBytes(fi.Length),
-                        Status = "Ready"
+                        Icon = "📄", Name = fi.Name, FullPath = p,
+                        IsDirectory = false, FileSize = fi.Length,
+                        DisplaySize = FormatBytes(fi.Length), Status = "Ready"
                     });
                 }
             }
-
-            UpdateSelectionSummary();
         }
 
-        private void BtnClearFiles_Click(object sender, RoutedEventArgs e)
-        {
-            _items.Clear();
-            UpdateSelectionSummary();
-        }
-
-        private void UpdateSelectionSummary()
-        {
-            long totalBytes = _items.Sum(i => i.FileSize);
-            TxtSelectedTotal.Text = $"{_items.Count} items ({FormatBytes(totalBytes)})";
-        }
-
+        // ─────────────────────────────────────────────
+        // Utility
+        // ─────────────────────────────────────────────
         private static string FormatBytes(long bytes)
         {
             if (bytes < 1024) return $"{bytes} B";
@@ -246,298 +669,5 @@ namespace HyperSend.UI
             if (bytes < 1024L * 1024L * 1024L) return $"{bytes / (1024.0 * 1024.0):F1} MB";
             return $"{bytes / (1024.0 * 1024.0 * 1024.0):F2} GB";
         }
-
-        #endregion
-
-        #region Sender Execution
-
-        private async void BtnSend_Click(object sender, RoutedEventArgs e)
-        {
-            if (_activeTransferCts != null)
-            {
-                _activeTransferCts.Cancel();
-                BtnSend.Content = "⚡ Send to Phone";
-                TxtTransferState.Text = "Cancelled";
-                return;
-            }
-
-            string ip = TxtPhoneIp.Text.Trim();
-            if (string.IsNullOrEmpty(ip) || ip == "Auto-detecting...")
-            {
-                MessageBox.Show("Please enter or auto-detect a valid Phone Hotspot IP address.", "Invalid IP", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            if (_items.Count == 0)
-            {
-                MessageBox.Show("Please drag & drop files or folders to send.", "No Files Selected", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-
-            string pin = TxtPin.Text.Trim();
-            if (pin.Length != 6)
-            {
-                MessageBox.Show("Please enter the 6-digit PIN shown on the phone screen for AES-256-GCM authenticated pairing.", "PIN Required", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            _activeTransferCts = new CancellationTokenSource();
-            BtnSend.Content = "⛔ Cancel Transfer";
-            BtnSend.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#DC2626"));
-            TxtTransferState.Text = "Connecting & Encrypting...";
-            _speedSamples.Clear();
-            DrawGraph();
-
-            try
-            {
-                byte[] sessionKey = CryptoEngine.DerivePinKey(pin, DefaultFixedSalt);
-                int streamCount = 6;
-                int chunkSize = NetworkConfig.DefaultChunkSize;
-
-                var progress = new Progress<TransferProgress>(p =>
-                {
-                    Dispatcher.Invoke(() =>
-                    {
-                        TransferProgressBar.Value = p.Percentage;
-                        TxtLiveSpeed.Text = $"{p.CurrentMBps:F1} MB/s";
-                        TxtAverageSpeed.Text = $"Avg: {p.AverageMBps:F1} MB/s";
-                        TxtProgressBytes.Text = $"{FormatBytes(p.BytesTransferred)} / {FormatBytes(p.TotalBytes)} ({p.Percentage:F1}%)";
-                        TxtElapsedTime.Text = $"{p.ElapsedSeconds:F1}s elapsed";
-
-                        double remainingBytes = p.TotalBytes - p.BytesTransferred;
-                        if (p.CurrentMBps > 1.0)
-                        {
-                            double eta = (remainingBytes / (1024.0 * 1024.0)) / p.CurrentMBps;
-                            TxtEta.Text = $"ETA: {eta:F1}s";
-                        }
-
-                        _speedSamples.Add(p.CurrentMBps);
-                        if (_speedSamples.Count > 60) _speedSamples.RemoveAt(0);
-                        DrawGraph();
-                    });
-                });
-
-                // Execute transfer for each item or directory bundle
-                foreach (var item in _items)
-                {
-                    item.Status = "Sending...";
-                    FileList.Items.Refresh();
-
-                    if (item.IsDirectory)
-                    {
-                        var (largeFiles, bundles) = BundlePacker.ScanDirectory(item.FullPath);
-                        TxtStatusLog.Text = $"Packed {bundles.Count} small-file bundles and {largeFiles.Count} large files for {item.Name}";
-
-                        // Send bundled data
-                        foreach (var bundle in bundles)
-                        {
-                            byte[] packed = await BundlePacker.PackBundleAsync(bundle, _activeTransferCts.Token);
-                            string tempBundlePath = IOPath.GetTempFileName();
-                            try
-                            {
-                                await File.WriteAllBytesAsync(tempBundlePath, packed, _activeTransferCts.Token);
-                                var client = new EncryptedChunkedSender(ip, NetworkConfig.DefaultPort, sessionKey, sessionId: 1L, streamCount: streamCount, chunkSize: chunkSize);
-                                await client.RunSenderAsync(tempBundlePath, packed.Length, progress, _activeTransferCts.Token);
-                            }
-                            finally
-                            {
-                                if (File.Exists(tempBundlePath)) File.Delete(tempBundlePath);
-                            }
-                        }
-
-                        // Send large files individually
-                        foreach (var large in largeFiles)
-                        {
-                            var client = new EncryptedChunkedSender(ip, NetworkConfig.DefaultPort, sessionKey, sessionId: 1L, streamCount: streamCount, chunkSize: chunkSize);
-                            await client.RunSenderAsync(large.AbsoluteSourcePath, large.FileSize, progress, _activeTransferCts.Token);
-                        }
-                    }
-                    else
-                    {
-                        var client = new EncryptedChunkedSender(ip, NetworkConfig.DefaultPort, sessionKey, sessionId: 1L, streamCount: streamCount, chunkSize: chunkSize);
-                        await client.RunSenderAsync(item.FullPath, item.FileSize, progress, _activeTransferCts.Token);
-                    }
-
-                    item.Status = "Completed ✓";
-                    FileList.Items.Refresh();
-                }
-
-                TxtTransferState.Text = "Transfer Finished Successfully!";
-                TxtStatusLog.Text = $"All items transferred. Verified with AES-256-GCM AEAD.";
-            }
-            catch (OperationCanceledException)
-            {
-                TxtTransferState.Text = "Transfer Cancelled";
-                TxtStatusLog.Text = "Transfer was stopped by user.";
-            }
-            catch (Exception ex)
-            {
-                TxtTransferState.Text = "Error";
-                TxtStatusLog.Text = $"Transfer error: {ex.Message}";
-                MessageBox.Show($"Transfer failed: {ex.Message}", "Transfer Error", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-            finally
-            {
-                _activeTransferCts = null;
-                BtnSend.Content = "⚡ Send to Phone";
-                BtnSend.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2563EB"));
-            }
-        }
-
-        #endregion
-
-        #region Receiver Service Execution
-
-        private void BtnChangeSaveDir_Click(object sender, RoutedEventArgs e)
-        {
-            var dlg = new OpenFolderDialog
-            {
-                Title = "Choose destination directory for incoming HyperSend transfers"
-            };
-
-            if (dlg.ShowDialog() == true)
-            {
-                _saveDirectory = dlg.FolderName;
-                TxtSaveDir.Text = $"Save to: {_saveDirectory}";
-            }
-        }
-
-        private void BtnToggleReceiver_Click(object sender, RoutedEventArgs e)
-        {
-            if (_isReceiverRunning)
-            {
-                _receiverCts?.Cancel();
-                _isReceiverRunning = false;
-                BtnToggleReceiver.Content = "Start Receiver";
-                BtnToggleReceiver.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#059669"));
-                TxtStatusLog.Text = "Receiver stopped.";
-                return;
-            }
-
-            string pin = TxtPin.Text.Trim();
-            if (pin.Length != 6)
-            {
-                MessageBox.Show("Please enter a 6-digit PIN so incoming connections can be authenticated with AES-256-GCM.", "PIN Required", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            Directory.CreateDirectory(_saveDirectory);
-            _receiverCts = new CancellationTokenSource();
-            _isReceiverRunning = true;
-            BtnToggleReceiver.Content = "Stop Receiver";
-            BtnToggleReceiver.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#DC2626"));
-            TxtStatusLog.Text = $"Receiver listening on 0.0.0.0:{NetworkConfig.DefaultPort}...";
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    byte[] sessionKey = CryptoEngine.DerivePinKey(pin, DefaultFixedSalt);
-                    var receiver = new EncryptedChunkedReceiver(sessionKey, expectedSessionId: 1L, port: NetworkConfig.DefaultPort, streamCount: 6);
-
-                    var progress = new Progress<TransferProgress>(p =>
-                    {
-                        Dispatcher.Invoke(() =>
-                        {
-                            TransferProgressBar.Value = p.Percentage;
-                            TxtLiveSpeed.Text = $"{p.CurrentMBps:F1} MB/s";
-                            TxtAverageSpeed.Text = $"Avg: {p.AverageMBps:F1} MB/s";
-                            TxtProgressBytes.Text = $"{FormatBytes(p.BytesTransferred)} / {FormatBytes(p.TotalBytes)}";
-                            TxtElapsedTime.Text = $"{p.ElapsedSeconds:F1}s elapsed";
-
-                            _speedSamples.Add(p.CurrentMBps);
-                            if (_speedSamples.Count > 60) _speedSamples.RemoveAt(0);
-                            DrawGraph();
-                        });
-                    });
-
-                    // Target receive file
-                    string destPath = IOPath.Combine(_saveDirectory, $"HyperSend_Received_{DateTime.Now:yyyyMMdd_HHmmss}.dat");
-                    var meter = await receiver.RunReceiverAsync(destPath, 0, NetworkConfig.DefaultChunkSize, progress, _receiverCts.Token);
-
-                    var (avgMBps, avgMbps, totalBytes, elapsed) = meter.GetSummary();
-                    Dispatcher.Invoke(() =>
-                    {
-                        TxtStatusLog.Text = $"Received {FormatBytes(totalBytes)} in {elapsed:F1}s ({avgMBps:F1} MB/s). Saved to {destPath}";
-                        MessageBox.Show($"File received successfully!\nSaved to: {destPath}\nSpeed: {avgMBps:F1} MB/s", "Transfer Complete", MessageBoxButton.OK, MessageBoxImage.Information);
-                    });
-                }
-                catch (OperationCanceledException)
-                {
-                    Dispatcher.Invoke(() => TxtStatusLog.Text = "Receiver stopped.");
-                }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() =>
-                    {
-                        TxtStatusLog.Text = $"Receiver error: {ex.Message}";
-                    });
-                }
-                finally
-                {
-                    Dispatcher.Invoke(() =>
-                    {
-                        _isReceiverRunning = false;
-                        BtnToggleReceiver.Content = "Start Receiver";
-                        BtnToggleReceiver.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#059669"));
-                    });
-                }
-            });
-        }
-
-        #endregion
-
-        #region Live Speed Graph Canvas Rendering
-
-        private void DrawGraph()
-        {
-            GraphCanvas.Children.Clear();
-            double width = GraphCanvas.ActualWidth;
-            double height = GraphCanvas.ActualHeight;
-
-            if (width <= 10 || height <= 10 || _speedSamples.Count < 2) return;
-
-            // Target 90 MB/s indicator line
-            double maxSpeed = Math.Max(120.0, _speedSamples.Max() * 1.15);
-            double targetY = height - (90.0 / maxSpeed * height);
-
-            if (targetY >= 0 && targetY <= height)
-            {
-                var targetLine = new Line
-                {
-                    X1 = 0,
-                    Y1 = targetY,
-                    X2 = width,
-                    Y2 = targetY,
-                    Stroke = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#059669")),
-                    StrokeThickness = 1,
-                    StrokeDashArray = new DoubleCollection { 4, 4 }
-                };
-                GraphCanvas.Children.Add(targetLine);
-            }
-
-            // Draw Throughput Curve
-            var points = new PointCollection();
-            double step = width / Math.Max(1, _speedSamples.Count - 1);
-
-            for (int i = 0; i < _speedSamples.Count; i++)
-            {
-                double x = i * step;
-                double speed = _speedSamples[i];
-                double y = height - (speed / maxSpeed * height);
-                points.Add(new Point(x, Math.Clamp(y, 2, height - 2)));
-            }
-
-            var polyline = new Polyline
-            {
-                Points = points,
-                Stroke = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#38BDF8")),
-                StrokeThickness = 2.5
-            };
-
-            GraphCanvas.Children.Add(polyline);
-        }
-
-        #endregion
     }
 }
