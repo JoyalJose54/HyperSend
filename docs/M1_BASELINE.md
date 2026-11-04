@@ -96,3 +96,4 @@ Running `HyperSend.Benchmark loopback --bytes 1GB --streams 4`:
    ```
 
 3. **Check Output:** Observe the reported MB/s on both sides.
+
