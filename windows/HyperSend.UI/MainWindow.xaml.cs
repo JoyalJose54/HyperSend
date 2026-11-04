@@ -264,6 +264,7 @@ namespace HyperSend.UI
         private void BtnReceiveFromPhone_Click(object sender, RoutedEventArgs e)
         {
             _isSender = false;
+            TxtPinDisplay.Text = GeneratePin();
             ShowPanel(AppState.PairingReceiver);
             // Start listening in background
             StartReceiverPairing();
@@ -307,9 +308,16 @@ namespace HyperSend.UI
 
             if (_items.Count == 0)
             {
-                MessageBox.Show("Please add files to send.", "No Files",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
+                _items.Add(new TransferItem
+                {
+                    Name = "High-Speed Benchmark Stream (2 GB)",
+                    FileSize = 2L * 1024 * 1024 * 1024,
+                    DisplaySize = "2.0 GB",
+                    FullPath = "",
+                    IsDirectory = false,
+                    Icon = "⚡",
+                    Status = "Ready"
+                });
             }
 
             _transferCts = new CancellationTokenSource();
@@ -355,7 +363,8 @@ namespace HyperSend.UI
                     {
                         var client = new EncryptedChunkedSender(ip, NetworkConfig.DefaultPort,
                             sessionKey, 1L, 6, NetworkConfig.DefaultChunkSize);
-                        lastMeter = await client.RunSenderAsync(item.FullPath, item.FileSize,
+                        string? filePath = string.IsNullOrEmpty(item.FullPath) ? null : item.FullPath;
+                        lastMeter = await client.RunSenderAsync(filePath, item.FileSize,
                             progress, _transferCts.Token);
                     }
                 }
@@ -411,15 +420,6 @@ namespace HyperSend.UI
                     var receiver = new EncryptedChunkedReceiver(sessionKey, 1L,
                         NetworkConfig.DefaultPort, 6);
 
-                    // Switch to Transferring panel once someone connects
-                    // We do it immediately so the user sees the spinner
-                    Dispatcher.Invoke(() =>
-                    {
-                        _isSender = false;
-                        ShowPanel(AppState.Transferring);
-                        TxtCurrentFile.Text = "Waiting for incoming data…";
-                    });
-
                     var progress = new Progress<TransferProgress>(p =>
                         Dispatcher.Invoke(() => UpdateTransferUI(p)));
 
@@ -458,6 +458,11 @@ namespace HyperSend.UI
         // ─────────────────────────────────────────────
         private void UpdateTransferUI(TransferProgress p)
         {
+            if (_state != AppState.Transferring)
+            {
+                ShowPanel(AppState.Transferring);
+            }
+
             double fraction = p.TotalBytes > 0
                 ? Math.Clamp((double)p.BytesTransferred / p.TotalBytes, 0.0, 1.0)
                 : 0.0;

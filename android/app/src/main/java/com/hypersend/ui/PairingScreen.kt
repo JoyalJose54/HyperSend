@@ -26,9 +26,10 @@ import com.hypersend.ui.theme.*
 fun PairingScreen(
     isSender: Boolean,
     pin: String,
+    localIp: String = "",
     targetIp: String,
     onTargetIpChanged: (String) -> Unit,
-    onConnect: () -> Unit,
+    onConnect: (String) -> Unit,
     onBack: () -> Unit
 ) {
     var pinInput by remember { mutableStateOf("") }
@@ -143,6 +144,15 @@ fun PairingScreen(
                                     fontSize = 11.sp,
                                     color = TextSecondary
                                 )
+                                if (localIp.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "IP: $localIp",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ElectricBlue
+                                    )
+                                }
                             }
                         }
                     }
@@ -248,7 +258,7 @@ fun PairingScreen(
                     }
 
                     Button(
-                        onClick = onConnect,
+                        onClick = { onConnect(pinInput) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(56.dp),
