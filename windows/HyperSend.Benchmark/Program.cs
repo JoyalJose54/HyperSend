@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Threading;
@@ -13,8 +14,8 @@ namespace HyperSend.Benchmark
         {
             Console.OutputEncoding = System.Text.Encoding.UTF8;
             Console.WriteLine("=========================================================");
-            Console.WriteLine(" HyperSend M1 High-Speed Wireless Transfer Benchmark");
-            Console.WriteLine(" Target: Phone -> Laptop >= 90 MB/s, Laptop -> Phone >= 65 MB/s");
+            Console.WriteLine(" HyperSend M2 Chunk Engine Benchmark & Sweep Utility");
+            Console.WriteLine(" Targets: Phone -> Laptop >= 90 MB/s, Laptop -> Phone >= 65 MB/s");
             Console.WriteLine("=========================================================\n");
 
             if (args.Length == 0 || args[0].Equals("--help", StringComparison.OrdinalIgnoreCase) || args[0].Equals("-h", StringComparison.OrdinalIgnoreCase))
@@ -65,12 +66,12 @@ namespace HyperSend.Benchmark
             Console.WriteLine("Usage:");
             Console.WriteLine("  HyperSend.Benchmark discover");
             Console.WriteLine("      Inspects active Wi-Fi link health and auto-detects phone hotspot IP.\n");
-            Console.WriteLine("  HyperSend.Benchmark server [--port 5000] [--streams 4] [--bytes 2GB] [--file <path>]");
-            Console.WriteLine("      Starts receiver. If --file is omitted, runs synthetic in-memory test (iperf3 equivalent).\n");
-            Console.WriteLine("  HyperSend.Benchmark client [--ip <phone-ip|auto>] [--port 5000] [--streams 4] [--bytes 2GB] [--file <path>]");
-            Console.WriteLine("      Starts sender to target IP. If --file is omitted, runs synthetic in-memory test.\n");
-            Console.WriteLine("  HyperSend.Benchmark loopback [--bytes 2GB] [--streams 4]");
-            Console.WriteLine("      Runs local in-memory loopback test to verify pipeline throughput ceiling.");
+            Console.WriteLine("  HyperSend.Benchmark server [--port 5000] [--streams 4] [--chunk 2MB] [--engine chunk|raw] [--bytes 2GB] [--file <path>]");
+            Console.WriteLine("      Starts receiver. Default engine is 'chunk' with dynamic work queue.\n");
+            Console.WriteLine("  HyperSend.Benchmark client [--ip <phone-ip|auto>] [--port 5000] [--streams 4] [--chunk 2MB] [--engine chunk|raw] [--bytes 2GB] [--file <path>]");
+            Console.WriteLine("      Starts sender to target IP.\n");
+            Console.WriteLine("  HyperSend.Benchmark loopback [--bytes 1GB] [--streams 4] [--chunk 2MB]");
+            Console.WriteLine("      Verifies local in-memory pipeline throughput ceiling with chunk engine.");
         }
 
         static void RunDiscover()
@@ -121,25 +122,36 @@ namespace HyperSend.Benchmark
         {
             int port = GetIntArg(args, "--port", NetworkConfig.DefaultPort);
             int streams = GetIntArg(args, "--streams", NetworkConfig.DefaultStreams);
+            int chunkSize = (int)GetBytesArg(args, "--chunk", NetworkConfig.DefaultChunkSize);
             long bytes = GetBytesArg(args, "--bytes", 2L * 1024 * 1024 * 1024);
             string? filePath = GetStringArg(args, "--file", null);
+            string engine = GetStringArg(args, "--engine", "chunk")!.ToLowerInvariant();
 
             Console.WriteLine($"[SERVER] Listening on 0.0.0.0:{port}");
+            Console.WriteLine($"[SERVER] Engine:          {(engine == "chunk" ? "M2 Dynamic Chunk Work Queue" : "M1 Static TCP")}");
             Console.WriteLine($"[SERVER] Parallel Streams: {streams}");
+            if (engine == "chunk")
+                Console.WriteLine($"[SERVER] Chunk Size:       {chunkSize / (1024.0 * 1024.0):F1} MB");
             Console.WriteLine($"[SERVER] Target Bytes:     {bytes / (1024.0 * 1024.0):F2} MB");
             Console.WriteLine($"[SERVER] Mode:             {(string.IsNullOrEmpty(filePath) ? "Synthetic Memory Drain (iperf3 equivalent)" : $"File Write ({filePath})")}");
             Console.WriteLine("Waiting for sender connections...");
 
-            var server = new RawTcpServer(port, streams);
-            var progress = new Progress<TransferProgress>(p =>
-            {
-                PrintLiveProgress(p);
-            });
-
+            var progress = new Progress<TransferProgress>(PrintLiveProgress);
             var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; cts.Cancel(); };
 
-            var meter = await server.RunReceiverAsync(filePath, bytes, progress, cts.Token);
+            ThroughputMeter meter;
+            if (engine == "chunk")
+            {
+                var server = new ChunkedTcpReceiver(port, streams);
+                meter = await server.RunReceiverAsync(filePath, bytes, chunkSize, progress, cts.Token);
+            }
+            else
+            {
+                var server = new RawTcpServer(port, streams);
+                meter = await server.RunReceiverAsync(filePath, bytes, progress, cts.Token);
+            }
+
             var (avgMBps, avgMbps, totalBytes, elapsed) = meter.GetSummary();
 
             Console.WriteLine("\n\n================ TRANSFER COMPLETE ================");
@@ -179,23 +191,34 @@ namespace HyperSend.Benchmark
 
             int port = GetIntArg(args, "--port", NetworkConfig.DefaultPort);
             int streams = GetIntArg(args, "--streams", NetworkConfig.DefaultStreams);
+            int chunkSize = (int)GetBytesArg(args, "--chunk", NetworkConfig.DefaultChunkSize);
             long bytes = GetBytesArg(args, "--bytes", 2L * 1024 * 1024 * 1024);
             string? filePath = GetStringArg(args, "--file", null);
+            string engine = GetStringArg(args, "--engine", "chunk")!.ToLowerInvariant();
 
             Console.WriteLine($"[CLIENT] Connecting to {targetIp}:{port} across {streams} parallel streams...");
+            Console.WriteLine($"[CLIENT] Engine:          {(engine == "chunk" ? "M2 Dynamic Chunk Work Queue" : "M1 Static TCP")}");
+            if (engine == "chunk")
+                Console.WriteLine($"[CLIENT] Chunk Size:       {chunkSize / (1024.0 * 1024.0):F1} MB");
             Console.WriteLine($"[CLIENT] Target Bytes:     {bytes / (1024.0 * 1024.0):F2} MB");
             Console.WriteLine($"[CLIENT] Mode:             {(string.IsNullOrEmpty(filePath) ? "Synthetic Memory Stream (iperf3 equivalent)" : $"File Read ({filePath})")}");
 
-            var client = new RawTcpClient(targetIp, port, streams);
-            var progress = new Progress<TransferProgress>(p =>
-            {
-                PrintLiveProgress(p);
-            });
-
+            var progress = new Progress<TransferProgress>(PrintLiveProgress);
             var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; cts.Cancel(); };
 
-            var meter = await client.RunSenderAsync(filePath, bytes, progress, cts.Token);
+            ThroughputMeter meter;
+            if (engine == "chunk")
+            {
+                var client = new ChunkedTcpSender(targetIp, port, streams, chunkSize);
+                meter = await client.RunSenderAsync(filePath, bytes, progress, cts.Token);
+            }
+            else
+            {
+                var client = new RawTcpClient(targetIp, port, streams);
+                meter = await client.RunSenderAsync(filePath, bytes, progress, cts.Token);
+            }
+
             var (avgMBps, avgMbps, totalBytes, elapsed) = meter.GetSummary();
 
             Console.WriteLine("\n\n================ TRANSFER COMPLETE ================");
@@ -213,20 +236,22 @@ namespace HyperSend.Benchmark
         static async Task<int> RunLoopbackAsync(string[] args)
         {
             int streams = GetIntArg(args, "--streams", NetworkConfig.DefaultStreams);
-            long bytes = GetBytesArg(args, "--bytes", 2L * 1024 * 1024 * 1024);
-            int port = 5005;
+            int chunkSize = (int)GetBytesArg(args, "--chunk", NetworkConfig.DefaultChunkSize);
+            long bytes = GetBytesArg(args, "--bytes", 1L * 1024 * 1024 * 1024);
+            int port = 5006;
 
-            Console.WriteLine($"[LOOPBACK] In-memory verification over 127.0.0.1:{port} ({streams} streams, {bytes / (1024.0 * 1024.0):F0} MB)");
+            Console.WriteLine($"[LOOPBACK] M2 Chunk Engine verification over 127.0.0.1:{port}");
+            Console.WriteLine($"  Streams: {streams} | Chunk Size: {chunkSize / (1024.0 * 1024.0):F1} MB | Total: {bytes / (1024.0 * 1024.0):F0} MB");
 
-            var server = new RawTcpServer(port, streams);
-            var serverTask = Task.Run(async () => await server.RunReceiverAsync(null, bytes));
+            var receiver = new ChunkedTcpReceiver(port, streams);
+            var receiverTask = Task.Run(async () => await receiver.RunReceiverAsync(null, bytes, chunkSize));
 
-            await Task.Delay(200); // allow server socket bind
+            await Task.Delay(150);
 
-            var client = new RawTcpClient("127.0.0.1", port, streams);
-            var meter = await client.RunSenderAsync(null, bytes);
+            var sender = new ChunkedTcpSender("127.0.0.1", port, streams, chunkSize);
+            var meter = await sender.RunSenderAsync(null, bytes);
 
-            await serverTask;
+            await receiverTask;
 
             var (avgMBps, avgMbps, totalBytes, elapsed) = meter.GetSummary();
             Console.WriteLine("\n[LOOPBACK RESULT]");
@@ -236,7 +261,7 @@ namespace HyperSend.Benchmark
             if (avgMBps > 500)
             {
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("  [PASS] Pipeline and socket engine verified with zero memory bottlenecks.");
+                Console.WriteLine("  [PASS] Chunk work queue and out-of-order pipeline verified at saturation speed.");
                 Console.ResetColor();
             }
 

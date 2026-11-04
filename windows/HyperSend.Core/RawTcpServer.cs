@@ -177,11 +177,7 @@ namespace HyperSend.Core
 
                     if (fileStream != null && currentOffset >= 0)
                     {
-                        lock (fileStream)
-                        {
-                            fileStream.Seek(currentOffset, SeekOrigin.Begin);
-                            fileStream.Write(buffer, 0, bytesRead);
-                        }
+                        RandomAccess.Write(fileStream.SafeFileHandle, buffer.AsSpan(0, bytesRead), currentOffset);
                         currentOffset += bytesRead;
                     }
 
