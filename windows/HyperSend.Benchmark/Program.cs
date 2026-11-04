@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Threading;
@@ -10,11 +9,16 @@ namespace HyperSend.Benchmark
 {
     class Program
     {
+        static readonly byte[] DefaultFixedSalt = new byte[16] {
+            0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A,
+            0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A
+        };
+
         static async Task<int> Main(string[] args)
         {
             Console.OutputEncoding = System.Text.Encoding.UTF8;
             Console.WriteLine("=========================================================");
-            Console.WriteLine(" HyperSend M2 Chunk Engine Benchmark & Sweep Utility");
+            Console.WriteLine(" HyperSend M3 Encrypted Transfer Benchmark");
             Console.WriteLine(" Targets: Phone -> Laptop >= 90 MB/s, Laptop -> Phone >= 65 MB/s");
             Console.WriteLine("=========================================================\n");
 
@@ -66,12 +70,12 @@ namespace HyperSend.Benchmark
             Console.WriteLine("Usage:");
             Console.WriteLine("  HyperSend.Benchmark discover");
             Console.WriteLine("      Inspects active Wi-Fi link health and auto-detects phone hotspot IP.\n");
-            Console.WriteLine("  HyperSend.Benchmark server [--port 5000] [--streams 4] [--chunk 2MB] [--engine chunk|raw] [--bytes 2GB] [--file <path>]");
-            Console.WriteLine("      Starts receiver. Default engine is 'chunk' with dynamic work queue.\n");
-            Console.WriteLine("  HyperSend.Benchmark client [--ip <phone-ip|auto>] [--port 5000] [--streams 4] [--chunk 2MB] [--engine chunk|raw] [--bytes 2GB] [--file <path>]");
+            Console.WriteLine("  HyperSend.Benchmark server [--port 5000] [--streams 6] [--chunk 2MB] [--pin <6-digits>] [--bytes 2GB] [--file <path>]");
+            Console.WriteLine("      Starts receiver. If --pin is provided, runs full AES-256-GCM AEAD encryption.\n");
+            Console.WriteLine("  HyperSend.Benchmark client [--ip <phone-ip|auto>] [--port 5000] [--streams 6] [--chunk 2MB] [--pin <6-digits>] [--bytes 2GB] [--file <path>]");
             Console.WriteLine("      Starts sender to target IP.\n");
-            Console.WriteLine("  HyperSend.Benchmark loopback [--bytes 1GB] [--streams 4] [--chunk 2MB]");
-            Console.WriteLine("      Verifies local in-memory pipeline throughput ceiling with chunk engine.");
+            Console.WriteLine("  HyperSend.Benchmark loopback [--bytes 1GB] [--streams 6] [--chunk 2MB] [--pin 123456]");
+            Console.WriteLine("      Verifies local in-memory pipeline throughput with AES-256-GCM encryption.");
         }
 
         static void RunDiscover()
@@ -121,17 +125,16 @@ namespace HyperSend.Benchmark
         static async Task<int> RunServerAsync(string[] args)
         {
             int port = GetIntArg(args, "--port", NetworkConfig.DefaultPort);
-            int streams = GetIntArg(args, "--streams", NetworkConfig.DefaultStreams);
+            int streams = GetIntArg(args, "--streams", 6);
             int chunkSize = (int)GetBytesArg(args, "--chunk", NetworkConfig.DefaultChunkSize);
             long bytes = GetBytesArg(args, "--bytes", 2L * 1024 * 1024 * 1024);
             string? filePath = GetStringArg(args, "--file", null);
-            string engine = GetStringArg(args, "--engine", "chunk")!.ToLowerInvariant();
+            string? pin = GetStringArg(args, "--pin", null);
 
             Console.WriteLine($"[SERVER] Listening on 0.0.0.0:{port}");
-            Console.WriteLine($"[SERVER] Engine:          {(engine == "chunk" ? "M2 Dynamic Chunk Work Queue" : "M1 Static TCP")}");
+            Console.WriteLine($"[SERVER] Security:        {(pin != null ? $"AES-256-GCM AEAD (PIN: {pin})" : "Unencrypted Chunk Engine")}");
             Console.WriteLine($"[SERVER] Parallel Streams: {streams}");
-            if (engine == "chunk")
-                Console.WriteLine($"[SERVER] Chunk Size:       {chunkSize / (1024.0 * 1024.0):F1} MB");
+            Console.WriteLine($"[SERVER] Chunk Size:       {chunkSize / (1024.0 * 1024.0):F1} MB");
             Console.WriteLine($"[SERVER] Target Bytes:     {bytes / (1024.0 * 1024.0):F2} MB");
             Console.WriteLine($"[SERVER] Mode:             {(string.IsNullOrEmpty(filePath) ? "Synthetic Memory Drain (iperf3 equivalent)" : $"File Write ({filePath})")}");
             Console.WriteLine("Waiting for sender connections...");
@@ -141,15 +144,16 @@ namespace HyperSend.Benchmark
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; cts.Cancel(); };
 
             ThroughputMeter meter;
-            if (engine == "chunk")
+            if (pin != null)
             {
-                var server = new ChunkedTcpReceiver(port, streams);
+                byte[] sessionKey = CryptoEngine.DerivePinKey(pin, DefaultFixedSalt);
+                var server = new EncryptedChunkedReceiver(sessionKey, expectedSessionId: 1L, port: port, streamCount: streams);
                 meter = await server.RunReceiverAsync(filePath, bytes, chunkSize, progress, cts.Token);
             }
             else
             {
-                var server = new RawTcpServer(port, streams);
-                meter = await server.RunReceiverAsync(filePath, bytes, progress, cts.Token);
+                var server = new ChunkedTcpReceiver(port, streams);
+                meter = await server.RunReceiverAsync(filePath, bytes, chunkSize, progress, cts.Token);
             }
 
             var (avgMBps, avgMbps, totalBytes, elapsed) = meter.GetSummary();
@@ -190,16 +194,22 @@ namespace HyperSend.Benchmark
             }
 
             int port = GetIntArg(args, "--port", NetworkConfig.DefaultPort);
-            int streams = GetIntArg(args, "--streams", NetworkConfig.DefaultStreams);
+            int streams = GetIntArg(args, "--streams", 6);
             int chunkSize = (int)GetBytesArg(args, "--chunk", NetworkConfig.DefaultChunkSize);
             long bytes = GetBytesArg(args, "--bytes", 2L * 1024 * 1024 * 1024);
             string? filePath = GetStringArg(args, "--file", null);
-            string engine = GetStringArg(args, "--engine", "chunk")!.ToLowerInvariant();
+            string? pin = GetStringArg(args, "--pin", null);
+
+            if (pin == null)
+            {
+                Console.Write("Enter 6-digit PIN shown on phone (press ENTER for unencrypted): ");
+                string? input = Console.ReadLine()?.Trim();
+                if (!string.IsNullOrEmpty(input)) pin = input;
+            }
 
             Console.WriteLine($"[CLIENT] Connecting to {targetIp}:{port} across {streams} parallel streams...");
-            Console.WriteLine($"[CLIENT] Engine:          {(engine == "chunk" ? "M2 Dynamic Chunk Work Queue" : "M1 Static TCP")}");
-            if (engine == "chunk")
-                Console.WriteLine($"[CLIENT] Chunk Size:       {chunkSize / (1024.0 * 1024.0):F1} MB");
+            Console.WriteLine($"[CLIENT] Security:        {(pin != null ? $"AES-256-GCM AEAD (PIN: {pin})" : "Unencrypted Chunk Engine")}");
+            Console.WriteLine($"[CLIENT] Chunk Size:       {chunkSize / (1024.0 * 1024.0):F1} MB");
             Console.WriteLine($"[CLIENT] Target Bytes:     {bytes / (1024.0 * 1024.0):F2} MB");
             Console.WriteLine($"[CLIENT] Mode:             {(string.IsNullOrEmpty(filePath) ? "Synthetic Memory Stream (iperf3 equivalent)" : $"File Read ({filePath})")}");
 
@@ -208,14 +218,15 @@ namespace HyperSend.Benchmark
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; cts.Cancel(); };
 
             ThroughputMeter meter;
-            if (engine == "chunk")
+            if (pin != null)
             {
-                var client = new ChunkedTcpSender(targetIp, port, streams, chunkSize);
+                byte[] sessionKey = CryptoEngine.DerivePinKey(pin, DefaultFixedSalt);
+                var client = new EncryptedChunkedSender(targetIp, port, sessionKey, sessionId: 1L, streamCount: streams, chunkSize: chunkSize);
                 meter = await client.RunSenderAsync(filePath, bytes, progress, cts.Token);
             }
             else
             {
-                var client = new RawTcpClient(targetIp, port, streams);
+                var client = new ChunkedTcpSender(targetIp, port, streams, chunkSize);
                 meter = await client.RunSenderAsync(filePath, bytes, progress, cts.Token);
             }
 
@@ -235,20 +246,22 @@ namespace HyperSend.Benchmark
 
         static async Task<int> RunLoopbackAsync(string[] args)
         {
-            int streams = GetIntArg(args, "--streams", NetworkConfig.DefaultStreams);
+            int streams = GetIntArg(args, "--streams", 6);
             int chunkSize = (int)GetBytesArg(args, "--chunk", NetworkConfig.DefaultChunkSize);
             long bytes = GetBytesArg(args, "--bytes", 1L * 1024 * 1024 * 1024);
-            int port = 5006;
+            string pin = GetStringArg(args, "--pin", "482910")!;
+            int port = 5007;
 
-            Console.WriteLine($"[LOOPBACK] M2 Chunk Engine verification over 127.0.0.1:{port}");
-            Console.WriteLine($"  Streams: {streams} | Chunk Size: {chunkSize / (1024.0 * 1024.0):F1} MB | Total: {bytes / (1024.0 * 1024.0):F0} MB");
+            Console.WriteLine($"[LOOPBACK] M3 Authenticated AES-256-GCM verification over 127.0.0.1:{port}");
+            Console.WriteLine($"  PIN: {pin} | Streams: {streams} | Chunk Size: {chunkSize / (1024.0 * 1024.0):F1} MB | Total: {bytes / (1024.0 * 1024.0):F0} MB");
 
-            var receiver = new ChunkedTcpReceiver(port, streams);
+            byte[] sessionKey = CryptoEngine.DerivePinKey(pin, DefaultFixedSalt);
+            var receiver = new EncryptedChunkedReceiver(sessionKey, expectedSessionId: 1L, port: port, streamCount: streams);
             var receiverTask = Task.Run(async () => await receiver.RunReceiverAsync(null, bytes, chunkSize));
 
             await Task.Delay(150);
 
-            var sender = new ChunkedTcpSender("127.0.0.1", port, streams, chunkSize);
+            var sender = new EncryptedChunkedSender("127.0.0.1", port, sessionKey, sessionId: 1L, streamCount: streams, chunkSize: chunkSize);
             var meter = await sender.RunSenderAsync(null, bytes);
 
             await receiverTask;
@@ -261,7 +274,7 @@ namespace HyperSend.Benchmark
             if (avgMBps > 500)
             {
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("  [PASS] Chunk work queue and out-of-order pipeline verified at saturation speed.");
+                Console.WriteLine("  [PASS] Hardware-accelerated AES-256-GCM encryption verified at gigabyte throughput.");
                 Console.ResetColor();
             }
 

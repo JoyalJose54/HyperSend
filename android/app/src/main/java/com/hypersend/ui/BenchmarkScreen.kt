@@ -1,5 +1,7 @@
 package com.hypersend.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -11,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hypersend.engine.*
@@ -20,12 +23,13 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BenchmarkScreen() {
-    var isSending by remember { mutableStateOf(true) } // true: Phone -> Laptop, false: Laptop -> Phone
-    var useChunkEngine by remember { mutableStateOf(true) } // true: M2 WorkQueue Chunk Engine, false: M1 Raw
-    var chunkSizeMb by remember { mutableStateOf("2") } // 1, 2, 4 MB
+    var isSending by remember { mutableStateOf(false) } // Default: Laptop -> Phone (Receive on phone)
+    var useEncryption by remember { mutableStateOf(true) } // M3: Authenticated AES-GCM
+    var pairingPin by remember { mutableStateOf(CryptoEngine.generateRandomPin()) }
     var targetIp by remember { mutableStateOf("10.15.70.247") } // Laptop IP on hotspot
     var port by remember { mutableStateOf("5000") }
-    var streams by remember { mutableStateOf("4") }
+    var streams by remember { mutableStateOf("6") } // Optimal 6 streams
+    var chunkSizeMb by remember { mutableStateOf("2") }
     var testSizeGb by remember { mutableStateOf("2") }
 
     var isRunning by remember { mutableStateOf(false) }
@@ -39,7 +43,7 @@ fun BenchmarkScreen() {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("HyperSend M2 Chunk Engine", fontWeight = FontWeight.Bold) },
+                title = { Text("HyperSend M3 Encrypted Transfer", fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -55,16 +59,31 @@ fun BenchmarkScreen() {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Speed Targets Header
+            // Pairing PIN Card
             Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Wi-Fi 6 Targets (80-90% of iperf3 Ceiling)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Text("• Phone -> Laptop: >= 90 MB/s (M1 measured: 93.1 MB/s)", fontSize = 13.sp)
-                    Text("• Laptop -> Phone: >= 65 MB/s (M2 Work Queue Optimization)", fontSize = 13.sp)
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("6-Digit Pairing PIN", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = pairingPin,
+                        fontSize = 36.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = FontFamily.Monospace,
+                        letterSpacing = 6.sp,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Text(
+                        "Enter this code on your laptop to authenticate",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
                 }
             }
 
@@ -72,37 +91,37 @@ fun BenchmarkScreen() {
             Text("Transfer Direction", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
-                    selected = isSending,
-                    onClick = { if (!isRunning) isSending = true },
-                    label = { Text("Phone -> Laptop") },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
                     selected = !isSending,
                     onClick = { if (!isRunning) isSending = false },
-                    label = { Text("Laptop -> Phone") },
+                    label = { Text("Laptop -> Phone (Receive)") },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = isSending,
+                    onClick = { if (!isRunning) isSending = true },
+                    label = { Text("Phone -> Laptop (Send)") },
                     modifier = Modifier.weight(1f)
                 )
             }
 
-            // Engine Mode Selector
-            Text("Engine Architecture", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            // Encryption Selector
+            Text("Security Mode", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
-                    selected = useChunkEngine,
-                    onClick = { if (!isRunning) useChunkEngine = true },
-                    label = { Text("M2: Dynamic Work Queue") },
+                    selected = useEncryption,
+                    onClick = { if (!isRunning) useEncryption = true },
+                    label = { Text("AES-256-GCM (Encrypted)") },
                     modifier = Modifier.weight(1f)
                 )
                 FilterChip(
-                    selected = !useChunkEngine,
-                    onClick = { if (!isRunning) useChunkEngine = false },
-                    label = { Text("M1: Static Raw TCP") },
+                    selected = !useEncryption,
+                    onClick = { if (!isRunning) useEncryption = false },
+                    label = { Text("Raw Chunk (Unencrypted)") },
                     modifier = Modifier.weight(1f)
                 )
             }
 
-            // Parameters Row
+            // Settings Fields
             if (isSending) {
                 OutlinedTextField(
                     value = targetIp,
@@ -117,16 +136,16 @@ fun BenchmarkScreen() {
                 OutlinedTextField(
                     value = streams,
                     onValueChange = { streams = it },
-                    label = { Text("Streams (2-8)") },
+                    label = { Text("Streams") },
                     modifier = Modifier.weight(1f),
                     enabled = !isRunning
                 )
                 OutlinedTextField(
                     value = chunkSizeMb,
                     onValueChange = { chunkSizeMb = it },
-                    label = { Text("Chunk MB (1-4)") },
+                    label = { Text("Chunk MB") },
                     modifier = Modifier.weight(1f),
-                    enabled = !isRunning && useChunkEngine
+                    enabled = !isRunning
                 )
                 OutlinedTextField(
                     value = testSizeGb,
@@ -137,14 +156,25 @@ fun BenchmarkScreen() {
                 )
             }
 
-            // Performance Card
+            // Live Performance Metrics Card
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Live Throughput", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Live Throughput", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        if (useEncryption) {
+                            Badge(containerColor = Color(0xFF2E7D32)) {
+                                Text("AEAD Hardware Crypto", color = Color.White, fontSize = 10.sp)
+                            }
+                        }
+                    }
 
                     val currentMBps = progressReport?.currentMBps ?: 0.0
                     val avgMBps = finalAvgMBps ?: progressReport?.averageMBps ?: 0.0
@@ -205,14 +235,46 @@ fun BenchmarkScreen() {
                         finalAvgMBps = null
                         statusText = if (isSending) "Sending to Laptop..." else "Waiting for Laptop connection..."
 
-                        val streamNum = streams.toIntOrNull() ?: 4
+                        val streamNum = streams.toIntOrNull() ?: 6
                         val targetPort = port.toIntOrNull() ?: 5000
                         val chunkSize = (chunkSizeMb.toIntOrNull() ?: 2) * 1024 * 1024
                         val totalBytes = ((testSizeGb.toDoubleOrNull() ?: 2.0) * 1024 * 1024 * 1024).toLong()
 
+                        // Derive 256-bit session key from PIN
+                        val fixedSalt = ByteArray(16) { 0x5A.toByte() }
+                        val sessionKey = CryptoEngine.derivePinKey(pairingPin, fixedSalt)
+
                         activeJob = coroutineScope.launch {
                             try {
-                                if (useChunkEngine) {
+                                if (useEncryption) {
+                                    if (isSending) {
+                                        val sender = EncryptedChunkedSender(
+                                            targetHost = targetIp,
+                                            targetPort = targetPort,
+                                            sessionMasterKey = sessionKey,
+                                            sessionId = 1L,
+                                            streamCount = streamNum,
+                                            chunkSize = chunkSize
+                                        )
+                                        val meter = sender.runSender(null, totalBytes) { report ->
+                                            progressReport = report
+                                        }
+                                        finalAvgMBps = meter.averageMegabytesPerSecond
+                                        statusText = String.format("Done! Avg: %.1f MB/s", meter.averageMegabytesPerSecond)
+                                    } else {
+                                        val receiver = EncryptedChunkedReceiver(
+                                            sessionMasterKey = sessionKey,
+                                            expectedSessionId = 1L,
+                                            port = targetPort,
+                                            streamCount = streamNum
+                                        )
+                                        val meter = receiver.runReceiver(null, totalBytes, chunkSize) { report ->
+                                            progressReport = report
+                                        }
+                                        finalAvgMBps = meter.averageMegabytesPerSecond
+                                        statusText = String.format("Done! Avg: %.1f MB/s", meter.averageMegabytesPerSecond)
+                                    }
+                                } else {
                                     if (isSending) {
                                         val sender = ChunkedTcpSender(targetIp, targetPort, streamNum, chunkSize)
                                         val meter = sender.runSender(null, totalBytes) { report ->
@@ -223,22 +285,6 @@ fun BenchmarkScreen() {
                                     } else {
                                         val receiver = ChunkedTcpReceiver(targetPort, streamNum)
                                         val meter = receiver.runReceiver(null, totalBytes, chunkSize) { report ->
-                                            progressReport = report
-                                        }
-                                        finalAvgMBps = meter.averageMegabytesPerSecond
-                                        statusText = String.format("Done! Avg: %.1f MB/s", meter.averageMegabytesPerSecond)
-                                    }
-                                } else {
-                                    if (isSending) {
-                                        val sender = RawTcpSender(targetIp, targetPort, streamNum)
-                                        val meter = sender.runSender(null, totalBytes) { report ->
-                                            progressReport = report
-                                        }
-                                        finalAvgMBps = meter.averageMegabytesPerSecond
-                                        statusText = String.format("Done! Avg: %.1f MB/s", meter.averageMegabytesPerSecond)
-                                    } else {
-                                        val receiver = RawTcpReceiver(targetPort, streamNum)
-                                        val meter = receiver.runReceiver(null, totalBytes) { report ->
                                             progressReport = report
                                         }
                                         finalAvgMBps = meter.averageMegabytesPerSecond
@@ -262,7 +308,7 @@ fun BenchmarkScreen() {
                 )
             ) {
                 Text(
-                    text = if (isRunning) "STOP TEST" else "START M2 CHUNK BENCHMARK",
+                    text = if (isRunning) "STOP TEST" else "START M3 ENCRYPTED BENCHMARK",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold
                 )

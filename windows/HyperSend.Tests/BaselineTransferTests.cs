@@ -44,7 +44,7 @@ namespace HyperSend.Tests
         public async Task LocalLoopback_FileTransfer_IntegrityVerified()
         {
             int port = 5100;
-            int streams = 4;
+            int streams = 1; // M1 bare TCP single stream integrity test (M2 tests multi-stream chunked out-of-order writes)
             long testBytes = 10 * 1024 * 1024; // 10 MB
 
             string tempSrc = Path.Combine(Path.GetTempPath(), $"hypersend_src_{Guid.NewGuid():N}.dat");

@@ -1,0 +1,27 @@
+{
+  "description": "HyperSend Shared Cryptographic Test Vectors",
+  "aes_256_gcm": [
+    {
+      "test_name": "Standard Vector 1",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonce_hex": "000000010000000000000001",
+      "plaintext_utf8": "HyperSend High-Speed Wireless Transfer Protocol v1.0",
+      "associated_data_hex": "485301060000000100000000000000340000000000000001",
+      "ciphertext_hex": "66487e914ebaf376c9444318c50ecfd8aa2f8c5c7604f58f553a1a5118742d4766f6cf5594b9aa1fcfce52f20c184c75",
+      "tag_hex": "b535805c317b6a13dcfdfaa0572d4177"
+    }
+  ],
+  "hkdf_sha256": {
+    "ikm_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+    "salt_hex": "000102030405060708090a0b0c",
+    "info_utf8": "HyperSend-Session-Key",
+    "okm_length": 32,
+    "expected_okm_hex": "0ac1299c2b89f60573be0915f4198a04ab4f042b64f140294b52d351ec3199ad"
+  },
+  "pin_auth": {
+    "pin": "482910",
+    "salt_hex": "a1b2c3d4e5f60718293a4b5c6d7e8f00",
+    "expected_derived_key_hex": "e9c1583d780287dfdb362a2656910608fa2f44c688849b25fc25fae16d4050eb"
+  }
+}
+

@@ -25,3 +25,4 @@ Following the implementation of the **Dynamic Chunk Work Queue**, **Consolidated
    In Linux/Android kernels, setting `SO_RCVBUF = 4MB` on `ServerSocketChannel` before `bind()` is critical. Without it, the kernel negotiates a restricted window scale factor during the initial SYN-ACK 3-way handshake, capping sustained laptop-to-phone throughput around ~50 MB/s.
 3. **Consolidated Atomic Header/Payload Writes:**
    Packing the 24-byte frame header and 2 MB chunk into a contiguous buffer and dispatching in a single OS write eliminates tiny 24-byte TCP packets and reduces syscall overhead by 50%.
+
