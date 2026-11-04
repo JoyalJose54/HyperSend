@@ -70,9 +70,8 @@ class EncryptedChunkedReceiver(
 
                 async(Dispatchers.IO) {
                     val headerBuf = ByteBuffer.allocateDirect(ChunkFrameHeader.SIZE)
-                    val headerArray = ByteArray(ChunkFrameHeader.SIZE)
                     var payloadBuf = ByteBuffer.allocateDirect(chunkSize + CryptoEngine.TAG_SIZE + 4096)
-                    var payloadArray = ByteArray(chunkSize + CryptoEngine.TAG_SIZE + 4096)
+                    var plainBuf = ByteBuffer.allocateDirect(chunkSize + 4096)
                     var counter = 0L
 
                     try {
@@ -88,8 +87,6 @@ class EncryptedChunkedReceiver(
                             if (headerBuf.hasRemaining()) break
 
                             headerBuf.flip()
-                            headerBuf.get(headerArray)
-                            headerBuf.position(0)
                             val header = ChunkFrameHeader.tryReadFrom(headerBuf) ?: break
 
                             if (header.type == 0x08.toByte()) { // FILE_DONE
@@ -103,7 +100,7 @@ class EncryptedChunkedReceiver(
 
                                 if (len > payloadBuf.capacity()) {
                                     payloadBuf = ByteBuffer.allocateDirect(len)
-                                    payloadArray = ByteArray(len)
+                                    plainBuf = ByteBuffer.allocateDirect(plaintextLen)
                                 }
                                 payloadBuf.clear()
                                 payloadBuf.limit(len)
@@ -115,23 +112,24 @@ class EncryptedChunkedReceiver(
                                 if (payloadBuf.hasRemaining()) break
 
                                 payloadBuf.flip()
-                                payloadBuf.get(payloadArray, 0, len)
+                                plainBuf.clear()
 
                                 counter++
                                 val nonce = CryptoEngine.formatNonce(streamId, counter)
 
-                                // Authenticated AES-GCM Decryption
-                                val decrypted = CryptoEngine.decrypt(
+                                // Direct off-heap zero-allocation AES-GCM Decryption
+                                headerBuf.position(0)
+                                CryptoEngine.decryptDirect(
                                     key = streamKey,
                                     nonce = nonce,
-                                    ciphertextWithTag = payloadArray,
-                                    offset = 0,
-                                    length = len,
-                                    associatedData = headerArray
+                                    inputCiphertextAndTag = payloadBuf,
+                                    outputPlaintext = plainBuf,
+                                    associatedData = headerBuf
                                 )
 
+                                plainBuf.flip()
+
                                 if (fileChannel != null) {
-                                    val plainBuf = ByteBuffer.wrap(decrypted)
                                     fileChannel.write(plainBuf, header.nonceOrOffset)
                                 }
 
@@ -170,4 +168,3 @@ class EncryptedChunkedReceiver(
         runCatching { serverChannel?.close() }
     }
 }
-

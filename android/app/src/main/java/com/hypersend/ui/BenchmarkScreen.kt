@@ -37,6 +37,7 @@ fun BenchmarkScreen() {
     var progressReport by remember { mutableStateOf<ProgressReport?>(null) }
     var finalAvgMBps by remember { mutableStateOf<Double?>(null) }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var activeJob by remember { mutableStateOf<Job?>(null) }
 
@@ -228,12 +229,14 @@ fun BenchmarkScreen() {
                 onClick = {
                     if (isRunning) {
                         activeJob?.cancel()
+                        com.hypersend.service.TransferForegroundService.stop(context)
                         isRunning = false
                         statusText = "Cancelled"
                     } else {
                         isRunning = true
                         finalAvgMBps = null
                         statusText = if (isSending) "Sending to Laptop..." else "Waiting for Laptop connection..."
+                        com.hypersend.service.TransferForegroundService.start(context)
 
                         val streamNum = streams.toIntOrNull() ?: 6
                         val targetPort = port.toIntOrNull() ?: 5000
@@ -294,6 +297,7 @@ fun BenchmarkScreen() {
                             } catch (e: Exception) {
                                 statusText = "Error: ${e.message}"
                             } finally {
+                                com.hypersend.service.TransferForegroundService.stop(context)
                                 isRunning = false
                             }
                         }

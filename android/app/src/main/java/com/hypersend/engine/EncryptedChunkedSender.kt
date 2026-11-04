@@ -40,7 +40,7 @@ class EncryptedChunkedSender(
                     NetworkConfig.configureChannel(ch)
                     ch.connect(InetSocketAddress(targetHost, targetPort))
 
-                    // Send 17-byte stream preamble: [Tag (8)][SessionId (8)][StreamId (1)]
+                    // 17-byte stream preamble
                     val preamble = ByteBuffer.allocate(17)
                     preamble.put("HS_DATA\u0000".toByteArray(Charsets.US_ASCII))
                     preamble.putLong(sessionId)
@@ -62,13 +62,13 @@ class EncryptedChunkedSender(
 
                 async(Dispatchers.IO) {
                     val headerBuf = ByteBuffer.allocateDirect(ChunkFrameHeader.SIZE)
-                    val headerArray = ByteArray(ChunkFrameHeader.SIZE)
-                    val plaintextArray = ByteArray(chunkSize)
+                    val plaintextBuf = ByteBuffer.allocateDirect(chunkSize)
+                    val encryptedBuf = ByteBuffer.allocateDirect(chunkSize + CryptoEngine.TAG_SIZE + 4096)
                     var counter = 0L
 
                     if (fileChannel == null) {
                         for (i in 0 until chunkSize) {
-                            plaintextArray[i] = (i and 0xFF).toByte()
+                            plaintextBuf.put((i and 0xFF).toByte())
                         }
                     }
 
@@ -77,9 +77,14 @@ class EncryptedChunkedSender(
                             val chunk = workQueue.pollNextChunk() ?: break
 
                             val len = chunk.length
+                            plaintextBuf.clear()
+                            plaintextBuf.limit(len)
+
                             if (fileChannel != null) {
-                                val readBuf = ByteBuffer.wrap(plaintextArray, 0, len)
-                                fileChannel.read(readBuf, chunk.offset)
+                                fileChannel.read(plaintextBuf, chunk.offset)
+                                plaintextBuf.flip()
+                            } else {
+                                plaintextBuf.position(0)
                             }
 
                             counter++
@@ -96,27 +101,26 @@ class EncryptedChunkedSender(
                             headerBuf.clear()
                             ChunkFrameHeader.writeTo(header, headerBuf)
                             headerBuf.flip()
-                            headerBuf.get(headerArray)
-                            headerBuf.position(0)
 
-                            // AES-GCM Encrypt
-                            val encrypted = CryptoEngine.encrypt(
+                            encryptedBuf.clear()
+
+                            // Zero-allocation direct ByteBuffer AES-GCM encryption in Conscrypt BoringSSL
+                            CryptoEngine.encryptDirect(
                                 key = streamKey,
                                 nonce = nonce,
-                                plaintext = plaintextArray,
-                                offset = 0,
-                                length = len,
-                                associatedData = headerArray
+                                inputPlaintext = plaintextBuf,
+                                outputCiphertextAndTag = encryptedBuf,
+                                associatedData = headerBuf.duplicate()
                             )
 
-                            val encryptedBuf = ByteBuffer.wrap(encrypted)
+                            encryptedBuf.flip()
 
                             // Send Header
                             while (headerBuf.hasRemaining()) {
                                 channel.write(headerBuf)
                             }
 
-                            // Send Encrypted Payload + Tag
+                            // Send Encrypted Payload
                             while (encryptedBuf.hasRemaining()) {
                                 val written = channel.write(encryptedBuf)
                                 if (written <= 0) break
@@ -163,4 +167,3 @@ class EncryptedChunkedSender(
         }
     }
 }
-

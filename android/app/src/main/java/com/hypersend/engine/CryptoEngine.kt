@@ -35,18 +35,12 @@ object CryptoEngine {
         return code.toString()
     }
 
-    /**
-     * Derives a 256-bit key from the 6-digit PIN and salt using PBKDF2-HMAC-SHA256.
-     */
     fun derivePinKey(pin: String, salt: ByteArray): ByteArray {
         val spec = PBEKeySpec(pin.toCharArray(), salt, PBKDF2_ITERATIONS, KEY_SIZE * 8)
         val skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         return skf.generateSecret(spec).encoded
     }
 
-    /**
-     * Formats a 12-byte stream nonce: [StreamID (4 bytes Big-Endian)] || [Counter (8 bytes Big-Endian)].
-     */
     fun formatNonce(streamId: Int, counter: Long): ByteArray {
         val buffer = ByteBuffer.allocate(NONCE_SIZE)
         buffer.putInt(streamId)
@@ -54,23 +48,16 @@ object CryptoEngine {
         return buffer.array()
     }
 
-    /**
-     * HKDF-Expand (RFC 5869) to derive independent 256-bit AEAD keys for parallel streams.
-     */
     fun deriveStreamKey(masterDataKey: ByteArray, streamId: Int): ByteArray {
         val info = "HyperSend-Stream-$streamId".toByteArray(Charsets.UTF_8)
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(masterDataKey, "HmacSHA256"))
         mac.update(info)
-        mac.update(0x01.toByte()) // counter byte for 1st block of 32 bytes
+        mac.update(0x01.toByte())
         val full = mac.doFinal()
         return full.copyOf(KEY_SIZE)
     }
 
-    /**
-     * Hardware-accelerated AES-256-GCM encryption on Android Conscrypt.
-     * Returns concatenated [Ciphertext (len)] + [Tag (16 bytes)].
-     */
     fun encrypt(
         key: ByteArray,
         nonce: ByteArray,
@@ -89,10 +76,6 @@ object CryptoEngine {
         return cipher.doFinal(plaintext, offset, length)
     }
 
-    /**
-     * Hardware-accelerated AES-256-GCM decryption and authentication on Android.
-     * Throws AEADBadTagException if the payload or tag was tampered with.
-     */
     fun decrypt(
         key: ByteArray,
         nonce: ByteArray,
@@ -112,12 +95,50 @@ object CryptoEngine {
     }
 
     /**
-     * HMAC-SHA256 authentication confirmation token.
+     * Zero-allocation direct ByteBuffer AES-GCM encryption.
+     * Operates directly on native memory pointers in Conscrypt / BoringSSL.
      */
+    fun encryptDirect(
+        key: ByteArray,
+        nonce: ByteArray,
+        inputPlaintext: ByteBuffer,
+        outputCiphertextAndTag: ByteBuffer,
+        associatedData: ByteBuffer? = null
+    ) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val keySpec = SecretKeySpec(key, "AES")
+        val gcmSpec = GCMParameterSpec(TAG_SIZE * 8, nonce)
+        cipher.init(Cipher.ENCRYPT_MODE, keySpec, gcmSpec)
+        if (associatedData != null) {
+            cipher.updateAAD(associatedData)
+        }
+        cipher.doFinal(inputPlaintext, outputCiphertextAndTag)
+    }
+
+    /**
+     * Zero-allocation direct ByteBuffer AES-GCM decryption.
+     * Operates directly on native memory pointers in Conscrypt / BoringSSL.
+     */
+    fun decryptDirect(
+        key: ByteArray,
+        nonce: ByteArray,
+        inputCiphertextAndTag: ByteBuffer,
+        outputPlaintext: ByteBuffer,
+        associatedData: ByteBuffer? = null
+    ) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val keySpec = SecretKeySpec(key, "AES")
+        val gcmSpec = GCMParameterSpec(TAG_SIZE * 8, nonce)
+        cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
+        if (associatedData != null) {
+            cipher.updateAAD(associatedData)
+        }
+        cipher.doFinal(inputCiphertextAndTag, outputPlaintext)
+    }
+
     fun computeHmac(key: ByteArray, data: ByteArray): ByteArray {
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(key, "HmacSHA256"))
         return mac.doFinal(data)
     }
 }
-
