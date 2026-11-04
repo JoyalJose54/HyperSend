@@ -80,6 +80,84 @@ namespace HyperSend.Core
         }
 
         /// <summary>
+        /// Detects available transport endpoints in priority order:
+        /// 1. USB ADB Reverse (127.0.0.1) if USB connected and adb active.
+        /// 2. Mobile Hotspot Gateway IP (e.g. 10.15.70.174).
+        /// 3. Fallback to user-specified IP or localhost.
+        /// </summary>
+        public static (string endpoint, string transportType) ResolvePrioritizedEndpoint(string? manualIp = null)
+        {
+            if (!string.IsNullOrEmpty(manualIp) && !manualIp.Equals("auto", StringComparison.OrdinalIgnoreCase))
+            {
+                return (manualIp, "Manual IP");
+            }
+
+            // Check if USB ADB is connected
+            if (IsAdbDeviceConnected())
+            {
+                try
+                {
+                    // Setup adb reverse tcp:5000 tcp:5000
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = "adb",
+                        Arguments = "reverse tcp:5000 tcp:5000",
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    using var p = Process.Start(psi);
+                    p?.WaitForExit(1000);
+                    if (p?.ExitCode == 0)
+                    {
+                        return ("127.0.0.1", "USB 3.0 / ADB High-Speed Link");
+                    }
+                }
+                catch { }
+            }
+
+            // Hotspot Gateway
+            var gateway = GetPhoneHotspotGatewayIp();
+            if (gateway != null)
+            {
+                return (gateway.ToString(), "5 GHz Mobile Hotspot Direct Link");
+            }
+
+            return ("127.0.0.1", "Local Loopback Fallback");
+        }
+
+        public static bool IsAdbDeviceConnected()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "adb",
+                    Arguments = "devices",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var p = Process.Start(psi);
+                if (p == null) return false;
+                string outStr = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(1000);
+
+                var lines = outStr.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var line in lines)
+                {
+                    if (line.StartsWith("List of devices") || line.StartsWith("*")) continue;
+                    if (line.Contains("device", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>
         /// Queries Windows WLAN API / netsh to obtain accurate Wi-Fi 6 link health metrics.
         /// </summary>
         public static LinkHealthInfo QueryLinkHealth()

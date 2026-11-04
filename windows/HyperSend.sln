@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HyperSend.Benchmark", "Hype
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HyperSend.Tests", "HyperSend.Tests\HyperSend.Tests.csproj", "{F849E575-B43A-4A6B-8101-77BB321B3070}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HyperSend.UI", "HyperSend.UI\HyperSend.UI.csproj", "{305AD881-0544-40FD-81C0-1114C9FA5BDD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -30,5 +32,9 @@ Global
 		{F849E575-B43A-4A6B-8101-77BB321B3070}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F849E575-B43A-4A6B-8101-77BB321B3070}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F849E575-B43A-4A6B-8101-77BB321B3070}.Release|Any CPU.Build.0 = Release|Any CPU
+		{305AD881-0544-40FD-81C0-1114C9FA5BDD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{305AD881-0544-40FD-81C0-1114C9FA5BDD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{305AD881-0544-40FD-81C0-1114C9FA5BDD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{305AD881-0544-40FD-81C0-1114C9FA5BDD}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
