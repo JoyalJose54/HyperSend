@@ -28,7 +28,8 @@ class ChunkedTcpReceiver(
         val meter = ThroughputMeter()
         serverChannel = ServerSocketChannel.open().apply {
             socket().reuseAddress = true
-            bind(InetSocketAddress(port), 16)
+            socket().receiveBufferSize = NetworkConfig.SOCKET_BUFFER_SIZE
+            bind(InetSocketAddress(port), 32)
         }
 
         val clientChannels = mutableListOf<SocketChannel>()

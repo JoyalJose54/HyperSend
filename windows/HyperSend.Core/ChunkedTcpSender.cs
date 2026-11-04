@@ -105,7 +105,7 @@ namespace HyperSend.Core
 
                 await Task.WhenAll(senderTasks);
 
-                // Send FILE_DONE frame on stream 0 to signal receiver
+                // Send FILE_DONE frame on stream 0
                 if (sockets.Length > 0 && sockets[0].Connected)
                 {
                     var doneHeader = new ChunkFrameHeader(NetworkConfig.TypeFileDone, 1, (uint)workQueue.TotalChunks, 0, (ulong)totalBytesToSend);
@@ -134,15 +134,16 @@ namespace HyperSend.Core
             ThroughputMeter meter,
             CancellationToken token)
         {
-            var headerBytes = new byte[ChunkFrameHeader.Size];
-            var payloadBuffer = ArrayPool<byte>.Shared.Rent(_chunkSize);
+            // Allocate combined buffer: 24 bytes header + chunk size
+            int frameBufferSize = ChunkFrameHeader.Size + _chunkSize;
+            var frameBuffer = ArrayPool<byte>.Shared.Rent(frameBufferSize);
 
-            // If synthetic, fill pattern once
+            // Synthetic pre-fill payload portion (offsets 24..)
             if (fileStream == null)
             {
-                for (int i = 0; i < payloadBuffer.Length; i++)
+                for (int i = ChunkFrameHeader.Size; i < frameBuffer.Length; i++)
                 {
-                    payloadBuffer[i] = (byte)(i & 0xFF);
+                    frameBuffer[i] = (byte)(i & 0xFF);
                 }
             }
 
@@ -157,14 +158,13 @@ namespace HyperSend.Core
                     int len = chunk.Length;
                     if (fileStream != null)
                     {
-                        // Concurrent non-blocking read from file at exact offset
                         RandomAccess.Read(
                             fileStream.SafeFileHandle,
-                            payloadBuffer.AsSpan(0, len),
+                            frameBuffer.AsSpan(ChunkFrameHeader.Size, len),
                             chunk.Offset);
                     }
 
-                    // Format 24-byte header
+                    // Format 24-byte header directly at offset 0..23
                     var header = new ChunkFrameHeader(
                         NetworkConfig.TypeDataChunk,
                         1,
@@ -172,11 +172,10 @@ namespace HyperSend.Core
                         len,
                         (ulong)chunk.Offset);
 
-                    header.WriteTo(headerBytes);
+                    header.WriteTo(frameBuffer.AsSpan(0, ChunkFrameHeader.Size));
 
-                    // Send Header + Payload
-                    netStream.Write(headerBytes, 0, ChunkFrameHeader.Size);
-                    netStream.Write(payloadBuffer, 0, len);
+                    // Send Header + Payload in a SINGLE atomic write call (no packet fragmentation)
+                    netStream.Write(frameBuffer, 0, ChunkFrameHeader.Size + len);
 
                     meter.AddBytes(len);
                 }
@@ -185,9 +184,8 @@ namespace HyperSend.Core
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(payloadBuffer);
+                ArrayPool<byte>.Shared.Return(frameBuffer);
             }
         }
     }
 }
-

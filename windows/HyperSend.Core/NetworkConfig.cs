@@ -8,8 +8,8 @@ namespace HyperSend.Core
         public const int DefaultPort = 5000;
         public const int DefaultStreams = 4;
         
-        // Socket buffers: 2 MB default (up to 4 MB for high-bandwidth Wi-Fi 6 links)
-        public const int SocketBufferSize = 2 * 1024 * 1024;
+        // Socket buffers: 4 MB for high-bandwidth Wi-Fi 6 (802.11ax) links
+        public const int SocketBufferSize = 4 * 1024 * 1024;
         
         // Default chunk size: 2 MB
         public const int DefaultChunkSize = 2 * 1024 * 1024;
@@ -30,25 +30,20 @@ namespace HyperSend.Core
         public const byte TypeCancel = 0x0A;
         public const byte TypeError = 0xFF;
         
-        public const int HeaderSize = 24; // Magic(2) + Ver(1) + Type(1) + FileId(4) + ChunkIndex(4) + Length(4) + Nonce(8)
+        public const int HeaderSize = 24;
 
         public static void ConfigureSocket(Socket socket)
         {
-            socket.NoDelay = true; // TCP_NODELAY disabled Nagle's algorithm
+            socket.NoDelay = true; // TCP_NODELAY disabled Nagle
             socket.SendBufferSize = SocketBufferSize;
             socket.ReceiveBufferSize = SocketBufferSize;
             socket.LingerState = new LingerOption(false, 0);
             
-            // Try enabling dual-mode / keep-alive where applicable
             try
             {
                 socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
             }
-            catch
-            {
-                // Ignored if platform doesn't permit
-            }
+            catch {}
         }
     }
 }
-
