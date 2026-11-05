@@ -38,6 +38,8 @@ namespace HyperSend.Core
             socket.SendBufferSize = SocketBufferSize;
             socket.ReceiveBufferSize = SocketBufferSize;
             socket.LingerState = new LingerOption(false, 0);
+            socket.SendTimeout = 30000;      // 30s timeout prevents hung connection DoS
+            socket.ReceiveTimeout = 30000;   // 30s timeout prevents hung connection DoS
             
             try
             {

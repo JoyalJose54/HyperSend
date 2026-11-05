@@ -65,14 +65,23 @@ class EncryptedChunkedReceiver(
                 val tag = ByteArray(8)
                 preambleBuf.get(tag)
                 val sessionId = preambleBuf.long
+                if (sessionId != expectedSessionId) {
+                    channel.close()
+                    throw IllegalStateException("Security violation: Session ID $sessionId does not match expected $expectedSessionId")
+                }
                 val streamId = preambleBuf.get().toInt() and 0xFF
+                if (streamId < 1 || streamId > streamCount) {
+                    channel.close()
+                    throw IllegalStateException("Security violation: Stream ID $streamId out of range [1..$streamCount]")
+                }
 
                 val streamKey = CryptoEngine.deriveStreamKey(sessionMasterKey, streamId)
 
                 async(Dispatchers.IO) {
                     val headerBuf = ByteBuffer.allocateDirect(ChunkFrameHeader.SIZE)
-                    var payloadBuf = ByteBuffer.allocateDirect(chunkSize + CryptoEngine.TAG_SIZE + 4096)
-                    var plainBuf = ByteBuffer.allocateDirect(chunkSize + 4096)
+                    val maxCapacity = chunkSize + CryptoEngine.TAG_SIZE + 65536
+                    var payloadBuf = ByteBuffer.allocateDirect(maxCapacity)
+                    var plainBuf = ByteBuffer.allocateDirect(maxCapacity)
                     var counter = 0L
 
                     try {
@@ -96,13 +105,16 @@ class EncryptedChunkedReceiver(
 
                             if (header.type == 0x06.toByte()) { // DATA_CHUNK
                                 val len = header.payloadLength
-                                if (len < CryptoEngine.TAG_SIZE) break
+                                // Defense: Enforce payload length boundaries against buffer overflow and DoS
+                                if (len < CryptoEngine.TAG_SIZE || len > maxCapacity) break
                                 val plaintextLen = len - CryptoEngine.TAG_SIZE
 
-                                if (len > payloadBuf.capacity()) {
-                                    payloadBuf = ByteBuffer.allocateDirect(len)
-                                    plainBuf = ByteBuffer.allocateDirect(plaintextLen)
+                                // Defense: Bounds check on write offset against disk exhaustion / sparse file bomb DoS
+                                val writeOffset = header.nonceOrOffset
+                                if (writeOffset < 0 || (expectedTotalBytes > 0 && writeOffset + plaintextLen > expectedTotalBytes)) {
+                                    break
                                 }
+
                                 payloadBuf.clear()
                                 payloadBuf.limit(len)
 

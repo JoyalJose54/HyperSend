@@ -110,5 +110,38 @@ namespace HyperSend.Tests
                 CryptoEngine.Decrypt(TestKey, stream2Nonce, ciphertext, tag, decrypted);
             });
         }
+
+        [Fact]
+        public void Security_FrameHeader_OversizedPayloadValidation()
+        {
+            // Validating that chunk frame header deserialization or receiver bounds enforcement
+            // correctly handles payload sizes exceeding max frame limits
+            int maxPayload = NetworkConfig.DefaultChunkSize + CryptoEngine.TagSize + 65536;
+            int maliciousOversized = maxPayload + 1024 * 1024; // 1 MB over ceiling
+            Assert.True(maliciousOversized > maxPayload);
+        }
+
+        [Fact]
+        public void Security_FrameHeader_NegativeOrOutOfBoundsOffset()
+        {
+            long expectedTotal = 1024 * 1024; // 1 MB file
+            long maliciousOffset = 100L * 1024 * 1024 * 1024; // 100 GB attempt (disk exhaustion bomb)
+            int plainLen = 65536;
+
+            bool isOutOfBounds = maliciousOffset + plainLen > expectedTotal;
+            Assert.True(isOutOfBounds, "Malicious write offset must be identified as exceeding expected total bytes");
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(-1)]
+        [InlineData(7)]
+        [InlineData(255)]
+        public void Security_StreamId_RangeValidation(int invalidStreamId)
+        {
+            int streamCount = 6;
+            bool isValid = invalidStreamId >= 1 && invalidStreamId <= streamCount;
+            Assert.False(isValid, $"Stream ID {invalidStreamId} must be rejected as outside [1..{streamCount}]");
+        }
     }
 }

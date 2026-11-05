@@ -104,7 +104,17 @@ namespace HyperSend.Core
                     await stream.ReadExactlyAsync(preamble, 0, 17, token);
 
                     ulong sessionId = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(preamble.AsSpan(8, 8));
+                    if (sessionId != (ulong)_expectedSessionId)
+                    {
+                        throw new InvalidOperationException($"Security violation: Session ID {sessionId} does not match expected {_expectedSessionId}");
+                    }
+
                     int streamId = preamble[16];
+                    if (streamId < 1 || streamId > _streamCount)
+                    {
+                        throw new InvalidOperationException($"Security violation: Stream ID {streamId} out of valid range [1..{_streamCount}]");
+                    }
+
                     byte[] streamKey = CryptoEngine.DeriveStreamKey(_sessionMasterKey, streamId);
 
                     workerTasks[i] = Task.Run(() => WorkerReceiveLoop(
@@ -115,6 +125,7 @@ namespace HyperSend.Core
                         chunkSize,
                         receivedChunks,
                         totalExpectedChunks,
+                        expectedTotalBytes,
                         meter,
                         token), token);
                 }
@@ -148,6 +159,7 @@ namespace HyperSend.Core
             int maxChunkSize,
             ConcurrentDictionary<uint, byte> receivedChunks,
             int totalExpectedChunks,
+            long expectedTotalBytes,
             ThroughputMeter meter,
             CancellationToken token)
         {
@@ -179,9 +191,20 @@ namespace HyperSend.Core
                     if (header.Type == NetworkConfig.TypeDataChunk)
                     {
                         int payloadLength = header.PayloadLength;
-                        if (payloadLength < CryptoEngine.TagSize) break;
+                        // Defense: Enforce payload length boundaries against buffer overflow and DoS
+                        if (payloadLength < CryptoEngine.TagSize || payloadLength > maxChunkSize + CryptoEngine.TagSize + 65536)
+                        {
+                            break;
+                        }
 
                         int plaintextLength = payloadLength - CryptoEngine.TagSize;
+
+                        // Defense: Bounds check on target file offset to prevent disk exhaustion / sparse file bomb DoS
+                        long writeOffset = (long)header.NonceOrOffset;
+                        if (writeOffset < 0 || (expectedTotalBytes > 0 && writeOffset + plaintextLength > expectedTotalBytes))
+                        {
+                            break;
+                        }
 
                         if (!ReadExact(netStream, payloadBuffer, 0, payloadLength))
                             break;
@@ -201,7 +224,7 @@ namespace HyperSend.Core
                             RandomAccess.Write(
                                 fileStream.SafeFileHandle,
                                 plaintextSpan,
-                                (long)header.NonceOrOffset);
+                                writeOffset);
                         }
 
                         receivedChunks.TryAdd(header.ChunkIndex, 0);

@@ -14,6 +14,7 @@ object NetworkConfig {
         socket.sendBufferSize = SOCKET_BUFFER_SIZE
         socket.receiveBufferSize = SOCKET_BUFFER_SIZE
         socket.setSoLinger(false, 0)
+        socket.soTimeout = 30000 // 30s timeout protects against hanging connection DoS
         try {
             socket.keepAlive = true
         } catch (_: Exception) {}
