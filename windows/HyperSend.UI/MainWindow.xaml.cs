@@ -458,7 +458,7 @@ namespace HyperSend.UI
         // ─────────────────────────────────────────────
         private void UpdateTransferUI(TransferProgress p)
         {
-            if (_state != AppState.Transferring)
+            if (_state != AppState.Transferring && p.BytesTransferred > 0)
             {
                 ShowPanel(AppState.Transferring);
             }

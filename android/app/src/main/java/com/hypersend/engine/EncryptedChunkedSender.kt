@@ -20,15 +20,17 @@ class EncryptedChunkedSender(
 ) {
     suspend fun runSender(
         sourceFile: File? = null,
+        fileChannel: java.nio.channels.FileChannel? = null,
+        totalBytesOverride: Long? = null,
         syntheticBytes: Long = 2L * 1024 * 1024 * 1024,
         onProgress: ((ProgressReport) -> Unit)? = null
     ): ThroughputMeter = withContext(Dispatchers.IO) {
         val meter = ThroughputMeter()
-        val totalBytes = sourceFile?.length() ?: syntheticBytes
+        val totalBytes = totalBytesOverride ?: sourceFile?.length() ?: fileChannel?.size() ?: syntheticBytes
         val workQueue = ChunkWorkQueue(totalBytes, chunkSize)
 
-        val raf = sourceFile?.let { RandomAccessFile(it, "r") }
-        val fileChannel = raf?.channel
+        val raf = if (fileChannel == null && sourceFile != null) RandomAccessFile(sourceFile, "r") else null
+        val effectiveChannel = fileChannel ?: raf?.channel
 
         val channels = mutableListOf<SocketChannel>()
 
@@ -66,7 +68,7 @@ class EncryptedChunkedSender(
                     val encryptedBuf = ByteBuffer.allocateDirect(chunkSize + CryptoEngine.TAG_SIZE + 4096)
                     var counter = 0L
 
-                    if (fileChannel == null) {
+                    if (effectiveChannel == null) {
                         for (i in 0 until chunkSize) {
                             plaintextBuf.put((i and 0xFF).toByte())
                         }
@@ -80,8 +82,8 @@ class EncryptedChunkedSender(
                             plaintextBuf.clear()
                             plaintextBuf.limit(len)
 
-                            if (fileChannel != null) {
-                                fileChannel.read(plaintextBuf, chunk.offset)
+                            if (effectiveChannel != null) {
+                                effectiveChannel.read(plaintextBuf, chunk.offset)
                                 plaintextBuf.flip()
                             } else {
                                 plaintextBuf.position(0)

@@ -41,7 +41,8 @@ fun HyperSendApp() {
     var currentMBps by remember { mutableStateOf(0.0) }
     var averageMBps by remember { mutableStateOf(0.0) }
     var bytesTransferred by remember { mutableStateOf(0L) }
-    val totalBytes by remember { mutableStateOf(2L * 1024 * 1024 * 1024) }
+    var totalBytes by remember { mutableStateOf(2L * 1024 * 1024 * 1024) }
+    var activeFileName by remember { mutableStateOf("High-Speed Stream (2 GB)") }
     var isComplete by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
@@ -64,6 +65,8 @@ fun HyperSendApp() {
                     currentMBps = 0.0
                     averageMBps = 0.0
                     bytesTransferred = 0L
+                    activeFileName = "Incoming Transfer"
+                    totalBytes = 2L * 1024 * 1024 * 1024
 
                     // START LISTENING ON PORT 5000 IMMEDIATELY!
                     TransferForegroundService.start(context)
@@ -106,7 +109,7 @@ fun HyperSendApp() {
                 localIp = localIp,
                 targetIp = targetIp,
                 onTargetIpChanged = { targetIp = it },
-                onConnect = { enteredPin ->
+                onConnect = { enteredPin, files ->
                     val actualPin = if (enteredPin.isNotBlank()) enteredPin else pin
                     pin = actualPin
                     screen = "transfer"
@@ -114,6 +117,15 @@ fun HyperSendApp() {
                     currentMBps = 0.0
                     averageMBps = 0.0
                     bytesTransferred = 0L
+
+                    val isBenchmark = files.isEmpty()
+                    if (isBenchmark) {
+                        activeFileName = "Synthetic Benchmark (2 GB)"
+                        totalBytes = 2L * 1024 * 1024 * 1024
+                    } else {
+                        activeFileName = if (files.size == 1) files[0].name else "${files.size} Files"
+                        totalBytes = files.sumOf { it.size }
+                    }
 
                     TransferForegroundService.start(context)
                     activeJob?.cancel()
@@ -129,12 +141,36 @@ fun HyperSendApp() {
                                 streamCount = 6,
                                 chunkSize = NetworkConfig.DEFAULT_CHUNK_SIZE
                             )
-                            val meter = sender.runSender(null, totalBytes) { report ->
-                                currentMBps = report.currentMBps
-                                averageMBps = report.averageMBps
-                                bytesTransferred = report.bytesTransferred
+
+                            if (isBenchmark) {
+                                val meter = sender.runSender(null, null, null, totalBytes) { report ->
+                                    currentMBps = report.currentMBps
+                                    averageMBps = report.averageMBps
+                                    bytesTransferred = report.bytesTransferred
+                                }
+                                averageMBps = meter.averageMegabytesPerSecond
+                            } else {
+                                var cumulativeTransferred = 0L
+                                for (fileInfo in files) {
+                                    activeFileName = fileInfo.name
+                                    val pfd = context.contentResolver.openFileDescriptor(fileInfo.uri, "r")
+                                    if (pfd != null) {
+                                        java.io.FileInputStream(pfd.fileDescriptor).use { fis ->
+                                            val channel = fis.channel
+                                            sender.runSender(
+                                                fileChannel = channel,
+                                                totalBytesOverride = fileInfo.size
+                                            ) { report ->
+                                                currentMBps = report.currentMBps
+                                                averageMBps = report.averageMBps
+                                                bytesTransferred = cumulativeTransferred + report.bytesTransferred
+                                            }
+                                            cumulativeTransferred += fileInfo.size
+                                        }
+                                        pfd.close()
+                                    }
+                                }
                             }
-                            averageMBps = meter.averageMegabytesPerSecond
                             isComplete = true
                             screen = "complete"
                         } catch (e: Exception) {
@@ -153,7 +189,7 @@ fun HyperSendApp() {
                 localIp = localIp,
                 targetIp = "",
                 onTargetIpChanged = {},
-                onConnect = {},
+                onConnect = { _, _ -> },
                 onBack = {
                     activeJob?.cancel()
                     TransferForegroundService.stop(context)
@@ -165,7 +201,7 @@ fun HyperSendApp() {
                 isSender = isSender,
                 deviceName = android.os.Build.MODEL,
                 peerDeviceName = "Windows PC",
-                fileName = "High-Speed Stream (2 GB)",
+                fileName = activeFileName,
                 totalBytes = totalBytes,
                 currentMBps = currentMBps,
                 averageMBps = averageMBps,

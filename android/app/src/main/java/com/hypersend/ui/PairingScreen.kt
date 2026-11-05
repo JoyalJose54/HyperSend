@@ -1,11 +1,17 @@
 package com.hypersend.ui
 
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -13,13 +19,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hypersend.ui.theme.*
+
+data class SelectedFileInfo(
+    val uri: Uri,
+    val name: String,
+    val size: Long
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -29,10 +43,33 @@ fun PairingScreen(
     localIp: String = "",
     targetIp: String,
     onTargetIpChanged: (String) -> Unit,
-    onConnect: (String) -> Unit,
+    onConnect: (String, List<SelectedFileInfo>) -> Unit,
     onBack: () -> Unit
 ) {
     var pinInput by remember { mutableStateOf("") }
+    var selectedFiles by remember { mutableStateOf<List<SelectedFileInfo>>(emptyList()) }
+    val context = LocalContext.current
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        val newFiles = uris.mapNotNull { uri ->
+            var name = "File"
+            var size = 0L
+            try {
+                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (cursor.moveToFirst()) {
+                        if (nameIdx != -1) name = cursor.getString(nameIdx)
+                        if (sizeIdx != -1) size = cursor.getLong(sizeIdx)
+                    }
+                }
+            } catch (_: Exception) {}
+            SelectedFileInfo(uri, name, size)
+        }
+        selectedFiles = (selectedFiles + newFiles).distinctBy { it.uri }
+    }
 
     val infiniteTransition = rememberInfiniteTransition(label = "pinPulse")
     val pulseScale by infiniteTransition.animateFloat(
@@ -66,26 +103,24 @@ fun PairingScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 20.dp, vertical = 24.dp),
+                .padding(horizontal = 20.dp, vertical = 20.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             // Top Header
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(onClick = onBack) {
-                        Text("←", fontSize = 24.sp, color = ElectricBlue)
-                    }
-                    Text(
-                        text = if (isSender) "Connect to PC" else "Waiting for Connection",
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary,
-                        modifier = Modifier.padding(start = 4.dp)
-                    )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Text("←", fontSize = 24.sp, color = ElectricBlue)
                 }
+                Text(
+                    text = if (isSender) "Connect to PC" else "Waiting for Connection",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
             }
 
             // Main content
@@ -98,7 +133,6 @@ fun PairingScreen(
                 ) {
                     // Pulsing ring around PIN card
                     Box(contentAlignment = Alignment.Center) {
-                        // Outer pulsing ring
                         Box(
                             modifier = Modifier
                                 .size(260.dp)
@@ -193,7 +227,7 @@ fun PairingScreen(
                             }
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "Listening for connection...",
+                                text = "Listening for PC on port 5000...",
                                 fontSize = 13.sp,
                                 color = TextSecondary
                             )
@@ -203,21 +237,118 @@ fun PairingScreen(
             } else {
                 // SENDER MODE
                 Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
+                    // 1. Files to send card
                     Card(
-                        shape = RoundedCornerShape(24.dp),
+                        shape = RoundedCornerShape(20.dp),
                         colors = CardDefaults.cardColors(containerColor = NavyCard),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(
-                            modifier = Modifier.padding(20.dp),
-                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Files to Send",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                                Button(
+                                    onClick = { filePickerLauncher.launch(arrayOf("*/*")) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text("+ Add Files", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                                }
+                            }
+
+                            if (selectedFiles.isEmpty()) {
+                                Text(
+                                    text = "No files added. (Instant 2 GB high-speed benchmark will run if empty)",
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                )
+                            } else {
+                                selectedFiles.forEach { file ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = file.name,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = TextPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            val displaySize = when {
+                                                file.size < 1024 -> "${file.size} B"
+                                                file.size < 1024 * 1024 -> String.format("%.1f KB", file.size / 1024.0)
+                                                file.size < 1024L * 1024L * 1024L -> String.format("%.1f MB", file.size / (1024.0 * 1024.0))
+                                                else -> String.format("%.2f GB", file.size / (1024.0 * 1024.0 * 1024.0))
+                                            }
+                                            Text(
+                                                text = displaySize,
+                                                fontSize = 11.sp,
+                                                color = TextSecondary
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { selectedFiles = selectedFiles.filter { it.uri != file.uri } },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Text("✕", fontSize = 14.sp, color = Color.Red)
+                                        }
+                                    }
+                                }
+
+                                val totalSize = selectedFiles.sumOf { it.size }
+                                val totalDisplay = when {
+                                    totalSize < 1024 -> "$totalSize B"
+                                    totalSize < 1024 * 1024 -> String.format("%.1f KB", totalSize / 1024.0)
+                                    totalSize < 1024L * 1024L * 1024L -> String.format("%.1f MB", totalSize / (1024.0 * 1024.0))
+                                    else -> String.format("%.2f GB", totalSize / (1024.0 * 1024.0 * 1024.0))
+                                }
+                                Text(
+                                    text = "Total: ${selectedFiles.size} file(s) • $totalDisplay",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ElectricBlue
+                                )
+                            }
+                        }
+                    }
+
+                    // 2. Connection Details card
+                    Card(
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(containerColor = NavyCard),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Text(
                                 text = "Connection Details",
-                                fontSize = 16.sp,
+                                fontSize = 15.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
                             )
@@ -239,7 +370,7 @@ fun PairingScreen(
                             OutlinedTextField(
                                 value = pinInput,
                                 onValueChange = { if (it.length <= 6) pinInput = it },
-                                label = { Text("6-Digit PIN") },
+                                label = { Text("6-Digit PIN from PC") },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -258,10 +389,10 @@ fun PairingScreen(
                     }
 
                     Button(
-                        onClick = { onConnect(pinInput) },
+                        onClick = { onConnect(pinInput, selectedFiles) },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(56.dp),
+                            .height(54.dp),
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
                         enabled = targetIp.isNotBlank()
@@ -269,7 +400,8 @@ fun PairingScreen(
                         Text(
                             text = "Connect & Send →",
                             fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Black
                         )
                     }
                 }
@@ -289,4 +421,3 @@ fun PairingScreen(
         }
     }
 }
-
