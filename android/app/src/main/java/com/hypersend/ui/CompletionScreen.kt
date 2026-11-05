@@ -27,6 +27,7 @@ fun CompletionScreen(
     averageMBps: Double,
     totalBytes: Long,
     isSender: Boolean,
+    savedPath: String? = null,
     onDone: () -> Unit
 ) {
     // Animate checkmark draw progress
@@ -179,6 +180,13 @@ fun CompletionScreen(
                         else "--"
                     )
 
+                    if (!isSender && !savedPath.isNullOrBlank()) {
+                        SummaryRow(
+                            label = "Saved to",
+                            value = savedPath
+                        )
+                    }
+
                     if (targetExceeded) {
                         HorizontalDivider(color = NavySurface)
                         Surface(
@@ -229,12 +237,14 @@ private fun SummaryRow(label: String, value: String) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = label, fontSize = 14.sp, color = TextSecondary)
+        Text(text = label, fontSize = 14.sp, color = TextSecondary, modifier = Modifier.padding(end = 8.dp))
         Text(
             text = value,
-            fontSize = 14.sp,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
-            color = TextPrimary
+            color = TextPrimary,
+            textAlign = TextAlign.End,
+            modifier = Modifier.weight(1f, fill = false)
         )
     }
 }

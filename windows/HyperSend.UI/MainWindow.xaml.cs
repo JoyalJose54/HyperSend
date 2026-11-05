@@ -194,6 +194,7 @@ namespace HyperSend.UI
                     SenderSubPanel.Visibility = Visibility.Collapsed;
                     string pin = GeneratePin();
                     TxtPinDisplay.Text = pin;
+                    TxtReceiverPcIp.Text = $"PC IP: {GetLocalIp()}";
                     break;
 
                 case AppState.PairingSender:
@@ -264,7 +265,6 @@ namespace HyperSend.UI
         private void BtnReceiveFromPhone_Click(object sender, RoutedEventArgs e)
         {
             _isSender = false;
-            TxtPinDisplay.Text = GeneratePin();
             ShowPanel(AppState.PairingReceiver);
             // Start listening in background
             StartReceiverPairing();

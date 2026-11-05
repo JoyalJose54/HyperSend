@@ -22,6 +22,7 @@ class EncryptedChunkedReceiver(
 
     suspend fun runReceiver(
         destinationFile: File? = null,
+        fileChannelOverride: java.nio.channels.FileChannel? = null,
         expectedTotalBytes: Long,
         chunkSize: Int = NetworkConfig.DEFAULT_CHUNK_SIZE,
         onProgress: ((ProgressReport) -> Unit)? = null
@@ -37,15 +38,15 @@ class EncryptedChunkedReceiver(
         try {
             meter.start()
 
-            val raf = destinationFile?.let {
-                it.parentFile?.mkdirs()
-                val r = RandomAccessFile(it, "rw")
+            val raf = if (fileChannelOverride == null && destinationFile != null) {
+                destinationFile.parentFile?.mkdirs()
+                val r = RandomAccessFile(destinationFile, "rw")
                 if (expectedTotalBytes > 0) {
                     r.setLength(expectedTotalBytes)
                 }
                 r
-            }
-            val fileChannel = raf?.channel
+            } else null
+            val fileChannel = fileChannelOverride ?: raf?.channel
 
             val totalExpectedChunks = ((expectedTotalBytes + chunkSize - 1) / chunkSize).toInt()
             val receivedChunks = ConcurrentHashMap<Long, Boolean>()

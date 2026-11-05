@@ -377,8 +377,10 @@
                         </Border>
                     </Grid>
 
-                    <TextBlock Text="Enter this PIN on the PC app" FontSize="13" Foreground="#6688AA"
+                    <TextBlock Text="Enter this PIN on the Phone app" FontSize="13" Foreground="#8899BB"
                                HorizontalAlignment="Center"/>
+                    <TextBlock x:Name="TxtReceiverPcIp" Text="" FontSize="13" FontWeight="SemiBold"
+                               Foreground="#4FC3F7" HorizontalAlignment="Center" Margin="0,6,0,0"/>
                 </StackPanel>
             </Grid>
 
@@ -394,7 +396,7 @@
                 <!-- IP + PIN fields -->
                 <Border Grid.Row="0" Style="{StaticResource Card}" Margin="0,0,0,14">
                     <StackPanel>
-                        <TextBlock Text="Phone IP Address" FontSize="12" Foreground="#6688AA" Margin="0,0,0,4"/>
+                        <TextBlock Text="Phone IP Address (shown on Phone screen)" FontSize="12" Foreground="#6688AA" Margin="0,0,0,4"/>
                         <TextBox x:Name="TxtPhoneIp" Text="" Margin="0,0,0,12"/>
                         <TextBlock Text="6-Digit PIN" FontSize="12" Foreground="#6688AA" Margin="0,0,0,4"/>
                         <TextBox x:Name="TxtPin" MaxLength="6" TextAlignment="Center"

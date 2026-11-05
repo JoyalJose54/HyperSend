@@ -1,5 +1,11 @@
 package com.hypersend.ui
 
+import android.content.ContentValues
+import android.media.MediaScannerConnection
+import android.os.Build
+import android.os.Environment
+import android.os.ParcelFileDescriptor
+import android.provider.MediaStore
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import com.hypersend.engine.CryptoEngine
@@ -10,18 +16,35 @@ import com.hypersend.service.TransferForegroundService
 import com.hypersend.ui.theme.HyperSendTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.io.File
+import java.io.RandomAccessFile
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 fun getLocalIp(): String {
     try {
-        val interfaces = NetworkInterface.getNetworkInterfaces() ?: return "10.15.70.174"
+        val interfaces = NetworkInterface.getNetworkInterfaces()?.toList() ?: return "10.15.70.174"
+        // 1. Prioritize Wi-Fi and Hotspot interfaces (wlan0, ap0, swlan0, rndis)
         for (intf in interfaces) {
-            val addrs = intf.inetAddresses
-            for (addr in addrs) {
+            val name = intf.name.lowercase()
+            if (name.contains("wlan") || name.contains("ap") || name.contains("rndis")) {
+                for (addr in intf.inetAddresses) {
+                    if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                        val host = addr.hostAddress ?: continue
+                        if (!host.startsWith("127.")) return host
+                    }
+                }
+            }
+        }
+        // 2. Fallback: any private IPv4
+        for (intf in interfaces) {
+            for (addr in intf.inetAddresses) {
                 if (!addr.isLoopbackAddress && addr is Inet4Address) {
                     val host = addr.hostAddress ?: continue
-                    if (host.startsWith("10.") || host.startsWith("192.168.")) {
+                    if (host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("172.")) {
                         return host
                     }
                 }
@@ -43,6 +66,7 @@ fun HyperSendApp() {
     var bytesTransferred by remember { mutableStateOf(0L) }
     var totalBytes by remember { mutableStateOf(2L * 1024 * 1024 * 1024) }
     var activeFileName by remember { mutableStateOf("High-Speed Stream (2 GB)") }
+    var savedFilePath by remember { mutableStateOf("") }
     var isComplete by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
@@ -65,6 +89,7 @@ fun HyperSendApp() {
                     currentMBps = 0.0
                     averageMBps = 0.0
                     bytesTransferred = 0L
+                    savedFilePath = ""
                     activeFileName = "Incoming Transfer"
                     totalBytes = 2L * 1024 * 1024 * 1024
 
@@ -72,7 +97,39 @@ fun HyperSendApp() {
                     TransferForegroundService.start(context)
                     activeJob?.cancel()
                     activeJob = coroutineScope.launch {
+                        var pfd: ParcelFileDescriptor? = null
+                        var destChannel: java.nio.channels.FileChannel? = null
+                        var finalSavedPath = ""
+                        var receiverInstance: EncryptedChunkedReceiver? = null
                         try {
+                            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                            val fileName = "HyperSend_$timeStamp.dat"
+
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                val values = ContentValues().apply {
+                                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                                    put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/HyperSend")
+                                }
+                                val destUri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                                if (destUri != null) {
+                                    pfd = context.contentResolver.openFileDescriptor(destUri, "rwt")
+                                    destChannel = pfd?.let { java.io.FileOutputStream(it.fileDescriptor).channel }
+                                    finalSavedPath = "Downloads/HyperSend/$fileName"
+                                }
+                            }
+
+                            if (destChannel == null) {
+                                val pubDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "HyperSend")
+                                pubDir.mkdirs()
+                                val targetFile = File(pubDir, fileName)
+                                finalSavedPath = targetFile.absolutePath
+                                val raf = RandomAccessFile(targetFile, "rw")
+                                destChannel = raf.channel
+                            }
+
+                            savedFilePath = finalSavedPath
+
                             val fixedSalt = ByteArray(16) { 0x5A.toByte() }
                             val sessionKey = CryptoEngine.derivePinKey(newPin, fixedSalt)
                             val receiver = EncryptedChunkedReceiver(
@@ -81,7 +138,14 @@ fun HyperSendApp() {
                                 port = NetworkConfig.DEFAULT_PORT,
                                 streamCount = 6
                             )
-                            val meter = receiver.runReceiver(null, 0L, NetworkConfig.DEFAULT_CHUNK_SIZE) { report ->
+                            receiverInstance = receiver
+
+                            val meter = receiver.runReceiver(
+                                destinationFile = null,
+                                fileChannelOverride = destChannel,
+                                expectedTotalBytes = 0L,
+                                chunkSize = NetworkConfig.DEFAULT_CHUNK_SIZE
+                            ) { report ->
                                 if (screen != "transfer") {
                                     screen = "transfer"
                                 }
@@ -92,11 +156,20 @@ fun HyperSendApp() {
                             averageMBps = meter.averageMegabytesPerSecond
                             isComplete = true
                             screen = "complete"
+
+                            try {
+                                if (finalSavedPath.startsWith("/")) {
+                                    MediaScannerConnection.scanFile(context, arrayOf(finalSavedPath), null, null)
+                                }
+                            } catch (_: Exception) {}
                         } catch (e: Exception) {
                             if (screen == "transfer" || screen == "pairing_receive") {
                                 screen = "home"
                             }
                         } finally {
+                            receiverInstance?.stop()
+                            runCatching { destChannel?.close() }
+                            runCatching { pfd?.close() }
                             TransferForegroundService.stop(context)
                         }
                     }
@@ -117,6 +190,7 @@ fun HyperSendApp() {
                     currentMBps = 0.0
                     averageMBps = 0.0
                     bytesTransferred = 0L
+                    savedFilePath = ""
 
                     val isBenchmark = files.isEmpty()
                     if (isBenchmark) {
@@ -218,9 +292,11 @@ fun HyperSendApp() {
                 averageMBps = averageMBps,
                 totalBytes = bytesTransferred,
                 isSender = isSender,
+                savedPath = savedFilePath,
                 onDone = {
                     screen = "home"
                     isComplete = false
+                    savedFilePath = ""
                 }
             )
         }
